@@ -2,6 +2,7 @@ package hcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -100,6 +101,14 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	}
 
 	static.previousStartRequest = in
+
+	if static.HiddifyOptions == nil {
+		return errorWrapper(
+			MessageType_ERROR_BUILDING_CONFIG,
+			errors.New("HiddifyOptions not initialized"),
+		)
+	}
+
 	stageStartedAt := time.Now()
 	options, err := BuildConfig(ctx, in)
 	if err != nil {
