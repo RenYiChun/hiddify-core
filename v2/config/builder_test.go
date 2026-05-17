@@ -96,3 +96,45 @@ func TestSetHiddifyCustomOptionsNormalizesLegacyRouteAdmissionDefaults(t *testin
 		t.Fatalf("expected legacy proxy route limit to normalize to %d, got %#v", DefaultProxyRouteConnectionLimit, got)
 	}
 }
+
+func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
+	options := option.Options{}
+	hopt := &HiddifyOptions{
+		RouteOptions: RouteOptions{
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassThreshold:     64,
+			DynamicDirectBypassTTL:           DurationInSeconds(900),
+			DynamicDirectBypassMaxRoutes:     128,
+			DynamicDirectBypassMaxRoutesHost: 16,
+		},
+	}
+
+	setHiddifyCustomOptions(&options, hopt)
+
+	if options.Custom == nil {
+		t.Fatal("expected custom options")
+	}
+	custom := *options.Custom
+	if got := custom[customDynamicDirectBypassEnabledKey]; got != true {
+		t.Fatalf("expected dynamic direct bypass enabled, got %#v", got)
+	}
+	if got := custom[customDynamicDirectBypassThresholdKey]; got != 64 {
+		t.Fatalf("expected threshold 64, got %#v", got)
+	}
+	if got := custom[customDynamicDirectBypassTTLKey]; got != 900 {
+		t.Fatalf("expected ttl 900, got %#v", got)
+	}
+	if got := custom[customDynamicDirectBypassMaxRoutesKey]; got != 128 {
+		t.Fatalf("expected max routes 128, got %#v", got)
+	}
+	if got := custom[customDynamicDirectBypassMaxRoutesHostKey]; got != 16 {
+		t.Fatalf("expected max routes per host 16, got %#v", got)
+	}
+	suffixes, ok := custom[customDynamicDirectBypassEagerSuffixesKey].([]string)
+	if !ok {
+		t.Fatalf("expected eager suffixes to be []string, got %#v", custom[customDynamicDirectBypassEagerSuffixesKey])
+	}
+	if !containsString(suffixes, "myqcloud.com") || !containsString(suffixes, "weixinbridge.com") {
+		t.Fatalf("expected eager suffixes to include WeCom document domains, got %#v", suffixes)
+	}
+}

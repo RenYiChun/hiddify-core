@@ -67,14 +67,19 @@ type URLTestOptions struct {
 }
 
 type RouteOptions struct {
-	ResolveDestination          bool                  `json:"resolve-destination,omitempty"`
-	IPv6Mode                    option.DomainStrategy `json:"ipv6-mode,omitempty"`
-	BypassLAN                   bool                  `json:"bypass-lan,omitempty"`
-	AllowConnectionFromLAN      bool                  `json:"allow-connection-from-lan,omitempty"`
-	BlockQuic                   bool                  `json:"block-quic,omitempty"`
-	DirectDomainSuffixRulesPath string                `json:"direct-domain-suffix-rules-path,omitempty"`
-	DirectRouteConnectionLimit  int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
-	ProxyRouteConnectionLimit   int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
+	ResolveDestination               bool                  `json:"resolve-destination,omitempty"`
+	IPv6Mode                         option.DomainStrategy `json:"ipv6-mode,omitempty"`
+	BypassLAN                        bool                  `json:"bypass-lan,omitempty"`
+	AllowConnectionFromLAN           bool                  `json:"allow-connection-from-lan,omitempty"`
+	BlockQuic                        bool                  `json:"block-quic,omitempty"`
+	DirectDomainSuffixRulesPath      string                `json:"direct-domain-suffix-rules-path,omitempty"`
+	DirectRouteConnectionLimit       int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
+	ProxyRouteConnectionLimit        int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
+	EnableDynamicDirectBypass        bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
+	DynamicDirectBypassThreshold     int                   `json:"dynamic-direct-bypass-threshold,omitempty" overridable:"true"`
+	DynamicDirectBypassTTL           DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
+	DynamicDirectBypassMaxRoutes     int                   `json:"dynamic-direct-bypass-max-routes,omitempty" overridable:"true"`
+	DynamicDirectBypassMaxRoutesHost int                   `json:"dynamic-direct-bypass-max-routes-per-host,omitempty" overridable:"true"`
 }
 
 type TLSTricks struct {
@@ -111,8 +116,12 @@ type WarpOptions struct {
 const DefaultBalancerStrategy = "round-robin"
 
 const (
-	DefaultDirectRouteConnectionLimit = 1024
-	DefaultProxyRouteConnectionLimit  = 256
+	DefaultDirectRouteConnectionLimit       = 1024
+	DefaultProxyRouteConnectionLimit        = 256
+	DefaultDynamicDirectBypassThreshold     = 64
+	DefaultDynamicDirectBypassTTL           = DurationInSeconds(1800)
+	DefaultDynamicDirectBypassMaxRoutes     = 512
+	DefaultDynamicDirectBypassMaxRoutesHost = 32
 )
 
 func DefaultHiddifyOptions() *HiddifyOptions {
@@ -144,12 +153,17 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			// URLTestIdleTimeout: DurationInSeconds(6000),
 		},
 		RouteOptions: RouteOptions{
-			ResolveDestination:         false,
-			IPv6Mode:                   option.DomainStrategy(dns.DomainStrategyAsIS),
-			BypassLAN:                  false,
-			AllowConnectionFromLAN:     false,
-			DirectRouteConnectionLimit: DefaultDirectRouteConnectionLimit,
-			ProxyRouteConnectionLimit:  DefaultProxyRouteConnectionLimit,
+			ResolveDestination:               false,
+			IPv6Mode:                         option.DomainStrategy(dns.DomainStrategyAsIS),
+			BypassLAN:                        false,
+			AllowConnectionFromLAN:           false,
+			DirectRouteConnectionLimit:       DefaultDirectRouteConnectionLimit,
+			ProxyRouteConnectionLimit:        DefaultProxyRouteConnectionLimit,
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassThreshold:     DefaultDynamicDirectBypassThreshold,
+			DynamicDirectBypassTTL:           DefaultDynamicDirectBypassTTL,
+			DynamicDirectBypassMaxRoutes:     DefaultDynamicDirectBypassMaxRoutes,
+			DynamicDirectBypassMaxRoutesHost: DefaultDynamicDirectBypassMaxRoutesHost,
 		},
 		LogLevel: "warn",
 		// LogFile:        "/dev/null",

@@ -146,6 +146,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance
+	startDynamicDirectBypassIfNeeded(*options)
 	if static.debug {
 		dumpPath := fmt.Sprint(sWorkingPath, "/data/goroutine-start.log")
 		go func() {

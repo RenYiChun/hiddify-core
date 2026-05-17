@@ -37,6 +37,7 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 		return response, nil
 	}
 
+	stopDynamicDirectBypass(context.Background())
 	stageStartedAt := time.Now()
 	if err := ss.CloseService(); err != nil {
 		LogTiming("StopService CloseService failed after ", time.Since(stageStartedAt), " total ", time.Since(startedAt))

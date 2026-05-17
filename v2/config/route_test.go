@@ -173,14 +173,17 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 
 	foundDNSRule := false
 	foundDriveDNSRule := false
+	foundCosDNSRule := false
 	for _, rule := range options.DNS.Rules {
 		hasWorkSuffix := containsString(rule.DefaultOptions.DomainSuffix, "work.weixin.qq.com")
 		hasDriveSuffix := containsString(rule.DefaultOptions.DomainSuffix, "weixin.qq.com")
-		if !hasWorkSuffix && !hasDriveSuffix {
+		hasCosSuffix := containsString(rule.DefaultOptions.DomainSuffix, "myqcloud.com")
+		if !hasWorkSuffix && !hasDriveSuffix && !hasCosSuffix {
 			continue
 		}
 		foundDNSRule = foundDNSRule || hasWorkSuffix
 		foundDriveDNSRule = foundDriveDNSRule || hasDriveSuffix
+		foundCosDNSRule = foundCosDNSRule || hasCosSuffix
 		if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
 			t.Fatalf("expected TUN work domain DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
 		}
@@ -194,18 +197,24 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	if !foundDriveDNSRule {
 		t.Fatal("expected weixin.qq.com direct DNS rule for drive/doc.weixin.qq.com")
 	}
+	if !foundCosDNSRule {
+		t.Fatal("expected myqcloud.com direct DNS rule for WeCom microdisk COS files")
+	}
 
 	foundRouteRule := false
 	foundDriveRouteRule := false
+	foundCosRouteRule := false
 	for _, rule := range options.Route.Rules {
 		defaultRule := rule.DefaultOptions
 		hasWorkSuffix := containsString(defaultRule.DomainSuffix, "work.weixin.qq.com")
 		hasDriveSuffix := containsString(defaultRule.DomainSuffix, "weixin.qq.com")
-		if !hasWorkSuffix && !hasDriveSuffix {
+		hasCosSuffix := containsString(defaultRule.DomainSuffix, "myqcloud.com")
+		if !hasWorkSuffix && !hasDriveSuffix && !hasCosSuffix {
 			continue
 		}
 		foundRouteRule = foundRouteRule || hasWorkSuffix
 		foundDriveRouteRule = foundDriveRouteRule || hasDriveSuffix
+		foundCosRouteRule = foundCosRouteRule || hasCosSuffix
 		if defaultRule.RouteOptions.Outbound != OutboundDirectTag {
 			t.Fatalf("expected work domain route rule to use %q, got %q", OutboundDirectTag, defaultRule.RouteOptions.Outbound)
 		}
@@ -215,6 +224,9 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	}
 	if !foundDriveRouteRule {
 		t.Fatal("expected weixin.qq.com direct route rule for drive/doc.weixin.qq.com")
+	}
+	if !foundCosRouteRule {
+		t.Fatal("expected myqcloud.com direct route rule for WeCom microdisk COS files")
 	}
 }
 

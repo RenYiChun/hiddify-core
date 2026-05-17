@@ -221,8 +221,14 @@ func appendUniqueRouteExcludePrefixes(existing []netip.Prefix, additions []netip
 }
 
 const (
-	customRouteDirectConnectionLimitKey = "hiddify-route-direct-connection-limit"
-	customRouteProxyConnectionLimitKey  = "hiddify-route-proxy-connection-limit"
+	customRouteDirectConnectionLimitKey       = "hiddify-route-direct-connection-limit"
+	customRouteProxyConnectionLimitKey        = "hiddify-route-proxy-connection-limit"
+	customDynamicDirectBypassEnabledKey       = "hiddify-dynamic-direct-bypass-enabled"
+	customDynamicDirectBypassThresholdKey     = "hiddify-dynamic-direct-bypass-threshold"
+	customDynamicDirectBypassTTLKey           = "hiddify-dynamic-direct-bypass-ttl"
+	customDynamicDirectBypassMaxRoutesKey     = "hiddify-dynamic-direct-bypass-max-routes"
+	customDynamicDirectBypassMaxRoutesHostKey = "hiddify-dynamic-direct-bypass-max-routes-per-host"
+	customDynamicDirectBypassEagerSuffixesKey = "hiddify-dynamic-direct-bypass-eager-domain-suffixes"
 )
 
 func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
@@ -243,6 +249,24 @@ func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
 		hopt.ProxyRouteConnectionLimit,
 		DefaultProxyRouteConnectionLimit,
 	)
+	custom[customDynamicDirectBypassEnabledKey] = hopt.EnableDynamicDirectBypass
+	custom[customDynamicDirectBypassThresholdKey] = normalizePositiveInt(
+		hopt.DynamicDirectBypassThreshold,
+		DefaultDynamicDirectBypassThreshold,
+	)
+	custom[customDynamicDirectBypassTTLKey] = normalizePositiveInt(
+		int(hopt.DynamicDirectBypassTTL),
+		int(DefaultDynamicDirectBypassTTL),
+	)
+	custom[customDynamicDirectBypassMaxRoutesKey] = normalizePositiveInt(
+		hopt.DynamicDirectBypassMaxRoutes,
+		DefaultDynamicDirectBypassMaxRoutes,
+	)
+	custom[customDynamicDirectBypassMaxRoutesHostKey] = normalizePositiveInt(
+		hopt.DynamicDirectBypassMaxRoutesHost,
+		DefaultDynamicDirectBypassMaxRoutesHost,
+	)
+	custom[customDynamicDirectBypassEagerSuffixesKey] = configuredDirectDomainSuffixRules(hopt)
 	options.Custom = &custom
 }
 
@@ -257,6 +281,13 @@ func normalizeRouteConnectionLimit(limit int, defaultLimit int) int {
 		return defaultLimit
 	}
 	return limit
+}
+
+func normalizePositiveInt(value int, defaultValue int) int {
+	if value < 1 {
+		return defaultValue
+	}
+	return value
 }
 
 func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string) error {
@@ -616,12 +647,16 @@ func directDNSRuleServer(hopt *HiddifyOptions) string {
 var defaultDirectDomainSuffixRules = []string{
 	"work.weixin.qq.com",
 	"weixin.qq.com",
+	"weixinbridge.com",
 	"wxwork.qq.com",
 	"wecom.qq.com",
+	"qq.com",
 	"qpic.cn",
 	"qpic.com",
 	"gtimg.cn",
 	"gtimg.com",
+	"myqcloud.com",
+	"qcloud.com",
 }
 
 func appendDirectDomainSuffixRules(

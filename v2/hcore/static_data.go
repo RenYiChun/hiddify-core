@@ -26,6 +26,8 @@ type HiddifyInstance struct {
 	lock                      sync.Mutex
 	globalPlatformInterface   libbox.PlatformInterface
 	previousStartRequest      *StartRequest
+	dynamicDirectBypassCancel context.CancelFunc
+	dynamicDirectBypass       *dynamicDirectBypassManager
 	debug                     bool
 	ListenPort                uint16
 	BaseContext               context.Context
