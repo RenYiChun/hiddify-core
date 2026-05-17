@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
 	sync "sync"
 	"time"
@@ -85,6 +86,7 @@ func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptio
 	if err := setOutbounds(&options, input, hopts, &staticIPs); err != nil {
 		return nil, err
 	}
+	setTunRouteExcludes(&options, hopts)
 	if err := setDns(&options, hopts, &staticIPs); err != nil {
 		return nil, err
 	}
@@ -92,6 +94,8 @@ func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptio
 	if err := setRoutingOptions(&options, hopts); err != nil {
 		return nil, err
 	}
+
+	setHiddifyCustomOptions(&options, hopts)
 
 	return &options, nil
 }
@@ -125,6 +129,134 @@ func getHostnameIfNotIP(inp string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("not a hostname: %s", inp)
+}
+
+func setTunRouteExcludes(options *option.Options, hopt *HiddifyOptions) {
+	if options == nil || hopt == nil || !hopt.EnableTun {
+		return
+	}
+	excludes := collectTunRouteExcludeAddresses(options, hopt)
+	if len(excludes) == 0 {
+		return
+	}
+	for i := range options.Inbounds {
+		if options.Inbounds[i].Tag != InboundTUNTag {
+			continue
+		}
+		tunOptions, ok := options.Inbounds[i].Options.(*option.TunInboundOptions)
+		if !ok {
+			continue
+		}
+		tunOptions.RouteExcludeAddress = appendUniqueRouteExcludePrefixes(tunOptions.RouteExcludeAddress, excludes)
+	}
+}
+
+func collectTunRouteExcludeAddresses(options *option.Options, hopt *HiddifyOptions) []netip.Prefix {
+	seen := map[string]netip.Prefix{}
+	addAddress := func(address string) {
+		prefix, ok := routeExcludePrefixFromAddress(address)
+		if !ok {
+			return
+		}
+		seen[prefix.String()] = prefix
+	}
+
+	addAddress(hopt.DirectDnsAddress)
+	addAddress(hopt.RemoteDnsAddress)
+	for _, outbound := range getAllOutboundsOptions(options) {
+		server, ok := outbound.(option.ServerOptionsWrapper)
+		if !ok {
+			continue
+		}
+		addAddress(server.TakeServerOptions().Server)
+	}
+
+	prefixes := make([]netip.Prefix, 0, len(seen))
+	for _, prefix := range seen {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Slice(prefixes, func(i, j int) bool {
+		return prefixes[i].String() < prefixes[j].String()
+	})
+	return prefixes
+}
+
+func routeExcludePrefixFromAddress(address string) (netip.Prefix, bool) {
+	host := strings.TrimSpace(address)
+	if host == "" {
+		return netip.Prefix{}, false
+	}
+	if strings.Contains(host, "://") {
+		parsedURL, err := url.Parse(host)
+		if err != nil {
+			return netip.Prefix{}, false
+		}
+		host = parsedURL.Hostname()
+	} else if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), true
+}
+
+func appendUniqueRouteExcludePrefixes(existing []netip.Prefix, additions []netip.Prefix) []netip.Prefix {
+	seen := map[string]struct{}{}
+	result := make([]netip.Prefix, 0, len(existing)+len(additions))
+	for _, prefix := range existing {
+		seen[prefix.String()] = struct{}{}
+		result = append(result, prefix)
+	}
+	for _, prefix := range additions {
+		if _, ok := seen[prefix.String()]; ok {
+			continue
+		}
+		seen[prefix.String()] = struct{}{}
+		result = append(result, prefix)
+	}
+	return result
+}
+
+const (
+	customRouteDirectConnectionLimitKey = "hiddify-route-direct-connection-limit"
+	customRouteProxyConnectionLimitKey  = "hiddify-route-proxy-connection-limit"
+)
+
+func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
+	if options == nil || hopt == nil {
+		return
+	}
+	custom := map[string]any{}
+	if options.Custom != nil {
+		for key, value := range *options.Custom {
+			custom[key] = value
+		}
+	}
+	custom[customRouteDirectConnectionLimitKey] = normalizeRouteConnectionLimit(
+		hopt.DirectRouteConnectionLimit,
+		DefaultDirectRouteConnectionLimit,
+	)
+	custom[customRouteProxyConnectionLimitKey] = normalizeRouteConnectionLimit(
+		hopt.ProxyRouteConnectionLimit,
+		DefaultProxyRouteConnectionLimit,
+	)
+	options.Custom = &custom
+}
+
+func normalizeRouteConnectionLimit(limit int, defaultLimit int) int {
+	if limit < 1 {
+		return defaultLimit
+	}
+	if defaultLimit == DefaultDirectRouteConnectionLimit && limit == 512 {
+		return defaultLimit
+	}
+	if defaultLimit == DefaultProxyRouteConnectionLimit && limit == 128 {
+		return defaultLimit
+	}
+	return limit
 }
 
 func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string) error {
@@ -247,10 +379,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		endpoints = append(endpoints, *out)
 	}
 	if len(opt.ConnectionTestUrls) == 0 {
-		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl, "https://www.google.com/generate_204", "http://captive.apple.com/generate_204", "https://cp.cloudflare.com"}
-		if isBlockedConnectionTestUrl(opt.ConnectionTestUrl) {
-			opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl}
-		}
+		opt.ConnectionTestUrls = preferredConnectionTestURLs(opt.ConnectionTestUrl)
 	}
 	// urlTest := option.Outbound{
 	// 	Type: C.TypeURLTest,
@@ -283,12 +412,17 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		},
 	}
 
+	balancerStrategy := opt.BalancerStrategy
+	if balancerStrategy == "" {
+		balancerStrategy = DefaultBalancerStrategy
+	}
+
 	balancer := option.Outbound{
 		Type: C.TypeBalancer,
 		Tag:  OutboundRoundRobinTag,
 		Options: &option.BalancerOutboundOptions{
 			Outbounds:            tags,
-			Strategy:             opt.BalancerStrategy,
+			Strategy:             balancerStrategy,
 			DelayAcceptableRatio: 2,
 			// URL:       opt.ConnectionTestUrl,
 			// URLs:      opt.ConnectionTestUrls,
@@ -316,7 +450,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		} else {
 			outbounds = append([]option.Outbound{balancer, urlTest}, outbounds...)
 			selectorTags = append([]string{urlTest.Tag, balancer.Tag}, selectorTags...)
-			defaultSelect = balancer.Tag
+			defaultSelect = urlTest.Tag
 
 		}
 	}
@@ -336,16 +470,21 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		outbounds,
 		[]option.Outbound{
 			{
-				Tag:     OutboundDirectTag,
-				Type:    C.TypeDirect,
-				Options: &option.DirectOutboundOptions{},
+				Tag:  OutboundDirectTag,
+				Type: C.TypeDirect,
+				Options: &option.DirectOutboundOptions{
+					DialerOptions: option.DialerOptions{
+						ConnectTimeout: badoption.Duration(3 * time.Second),
+					},
+				},
 			},
 			{
 				Tag:  OutboundDirectFragmentTag,
 				Type: C.TypeDirect,
 				Options: &option.DirectOutboundOptions{
 					DialerOptions: option.DialerOptions{
-						TCPFastOpen: false,
+						TCPFastOpen:    false,
+						ConnectTimeout: badoption.Duration(3 * time.Second),
 
 						TLSFragment: option.TLSFragmentOptions{
 							Enabled: true,
@@ -369,6 +508,30 @@ func isBlockedConnectionTestUrl(d string) bool {
 	return isBlockedDomain(u.Host)
 }
 
+func preferredConnectionTestURLs(configured string) []string {
+	return uniqueStrings([]string{
+		"https://cp.cloudflare.com",
+		"https://www.google.com/generate_204",
+		"https://google.com/generate_204",
+		configured,
+		"http://captive.apple.com/generate_204",
+	})
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -380,10 +543,7 @@ func contains(slice []string, item string) bool {
 
 func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 	if len(hopt.ConnectionTestUrls) == 0 {
-		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl, "http://captive.apple.com/generate_204", "https://cp.cloudflare.com", "https://google.com/generate_204"}
-		if isBlockedConnectionTestUrl(hopt.ConnectionTestUrl) {
-			hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
-		}
+		hopt.ConnectionTestUrls = preferredConnectionTestURLs(hopt.ConnectionTestUrl)
 	}
 	if hopt.EnableClashApi {
 		if hopt.ClashApiSecret == "" {
@@ -407,6 +567,7 @@ func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 			Monitoring: &option.MonitoringOptions{
 				URLs:           hopt.ConnectionTestUrls,
 				Interval:       badoption.Duration(hopt.URLTestInterval.Duration()),
+				Workers:        3,
 				DebounceWindow: badoption.Duration(time.Millisecond * 500),
 				IdleTimeout:    badoption.Duration(hopt.URLTestInterval.Duration().Nanoseconds() * 3),
 			},
@@ -430,6 +591,79 @@ func isIPv6Supported() bool {
 	_, err := net.ResolveIPAddr("ip6", "::1")
 	return err == nil
 }
+
+func shouldEnableIPv6(hopt *HiddifyOptions) bool {
+	if hopt.IPv6Mode == option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		return false
+	}
+	return isIPv6Supported()
+}
+
+func defaultDomainResolverServer(hopt *HiddifyOptions) string {
+	if hopt.EnableTun || hopt.EnableTunService {
+		return DNSLocalTag
+	}
+	return DNSMultiDirectTag
+}
+
+func directDNSRuleServer(hopt *HiddifyOptions) string {
+	if hopt.EnableTun || hopt.EnableTunService {
+		return DNSLocalTag
+	}
+	return DNSMultiDirectTag
+}
+
+var defaultDirectDomainSuffixRules = []string{
+	"work.weixin.qq.com",
+	"weixin.qq.com",
+	"wxwork.qq.com",
+	"wecom.qq.com",
+	"qpic.cn",
+	"qpic.com",
+	"gtimg.cn",
+	"gtimg.com",
+}
+
+func appendDirectDomainSuffixRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	domainSuffixes []string,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	if len(domainSuffixes) == 0 {
+		return dnsRules, routeRules
+	}
+	dnsRules = append(dnsRules, option.DefaultDNSRule{
+		RawDefaultDNSRule: option.RawDefaultDNSRule{
+			DomainSuffix: domainSuffixes,
+		},
+		DNSRuleAction: option.DNSRuleAction{
+			Action: C.RuleActionTypeRoute,
+			RouteOptions: option.DNSRouteActionOptions{
+				Server:         directDNSRuleServer(hopt),
+				Strategy:       hopt.DirectDnsDomainStrategy,
+				RewriteTTL:     &DEFAULT_DNS_TTL,
+				BypassIfFailed: true,
+			},
+		},
+	})
+	routeRules = append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				DomainSuffix: domainSuffixes,
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{
+					Outbound: OutboundDirectTag,
+				},
+			},
+		},
+	})
+	return dnsRules, routeRules
+}
+
 func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	// var inboundDomainStrategy option.DomainStrategy
 	// if !opt.ResolveDestination {
@@ -437,7 +671,7 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	// } else {
 	// 	inboundDomainStrategy = opt.IPv6Mode
 	// }
-	ipv6Enable := isIPv6Supported()
+	ipv6Enable := shouldEnableIPv6(hopt)
 	if hopt.EnableTun {
 
 		opts := option.TunInboundOptions{
@@ -748,11 +982,11 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			DNSRuleAction: option.DNSRuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSMultiDirectTag,
+					Server:         directDNSRuleServer(hopt),
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 					DisableCache:   false,
-					BypassIfFailed: false,
+					BypassIfFailed: true,
 				},
 			},
 		})
@@ -771,6 +1005,12 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 	}
+	dnsRules, routeRules = appendDirectDomainSuffixRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		configuredDirectDomainSuffixRules(hopt),
+	)
 	rejectRCode := (option.DNSRCode(sdns.RcodeRefused))
 	rejectDnsAction := option.DNSRuleAction{
 		Action: C.RuleActionTypePredefined,
@@ -882,10 +1122,10 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			DNSRuleAction: option.DNSRuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSMultiDirectTag,
+					Server:         directDNSRuleServer(hopt),
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: false,
+					BypassIfFailed: true,
 				},
 			},
 		})
@@ -914,24 +1154,28 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			DNSRuleAction: option.DNSRuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSMultiDirectTag,
+					Server:         directDNSRuleServer(hopt),
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: false,
+					BypassIfFailed: true,
 				},
 			},
 		})
 
-		rulesets = append(rulesets, option.RuleSet{
-			Type:   C.RuleSetTypeRemote,
-			Tag:    "geoip-" + hopt.Region,
-			Format: C.RuleSetFormatBinary,
-			RemoteOptions: option.RemoteRuleSet{
-				URL:            "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geoip-" + hopt.Region + ".srs",
-				UpdateInterval: badoption.Duration(5 * time.Hour * 24),
-				DownloadDetour: OutboundSelectTag,
-			},
-		})
+		regionRouteSets := []string{"geosite-" + hopt.Region}
+		if !hopt.EnableTun && !hopt.EnableTunService {
+			regionRouteSets = append([]string{"geoip-" + hopt.Region}, regionRouteSets...)
+			rulesets = append(rulesets, option.RuleSet{
+				Type:   C.RuleSetTypeRemote,
+				Tag:    "geoip-" + hopt.Region,
+				Format: C.RuleSetFormatBinary,
+				RemoteOptions: option.RemoteRuleSet{
+					URL:            "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geoip-" + hopt.Region + ".srs",
+					UpdateInterval: badoption.Duration(5 * time.Hour * 24),
+					DownloadDetour: OutboundSelectTag,
+				},
+			})
+		}
 		rulesets = append(rulesets, option.RuleSet{
 			Type:   C.RuleSetTypeRemote,
 			Tag:    "geosite-" + hopt.Region,
@@ -947,10 +1191,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			Type: C.RuleTypeDefault,
 			DefaultOptions: option.DefaultRule{
 				RawDefaultRule: option.RawDefaultRule{
-					RuleSet: []string{
-						"geoip-" + hopt.Region,
-						"geosite-" + hopt.Region,
-					},
+					RuleSet: regionRouteSets,
 				},
 				RuleAction: option.RuleAction{
 					Action: C.RuleActionTypeRoute,
@@ -982,7 +1223,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		Final:               OutboundMainDetour,
 		AutoDetectInterface: (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService),
 		DefaultDomainResolver: &option.DomainResolveOptions{
-			Server:   DNSMultiDirectTag,
+			Server:   defaultDomainResolverServer(hopt),
 			Strategy: hopt.DirectDnsDomainStrategy,
 		},
 		// OverrideAndroidVPN: hopt.EnableTun && C.IsAndroid,

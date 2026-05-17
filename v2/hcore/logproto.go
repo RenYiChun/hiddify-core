@@ -48,6 +48,10 @@ func Log(level LogLevel, typ LogType, message ...any) {
 	})
 }
 
+func LogTiming(message ...any) {
+	fmt.Println(append([]any{"H CORE TIMING"}, message...)...)
+}
+
 func (s *CoreService) LogListener(req *LogRequest, stream grpc.ServerStreamingServer[LogMessage]) error {
 	logSub := static.logObserver.Subscribe(1)
 	defer static.logObserver.Unsubscribe(logSub)

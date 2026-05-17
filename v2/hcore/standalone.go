@@ -162,17 +162,7 @@ func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts 
 	}
 
 	finalconfig.Log.Output = ""
-	finalconfig.Experimental = &option.ExperimentalOptions{
-		ClashAPI: &option.ClashAPIOptions{
-			ExternalUI: "webui",
-		},
-	}
-	// finalconfig.Experimental.ClashAPI.ExternalUI = "webui"
-	if hopts.AllowConnectionFromLAN {
-		finalconfig.Experimental.ClashAPI.ExternalController = "0.0.0.0:16756"
-	} else {
-		finalconfig.Experimental.ClashAPI.ExternalController = "127.0.0.1:16756"
-	}
+	applyStandaloneExperimentalOptions(finalconfig, hopts)
 
 	fmt.Printf("Open http://localhost:6756/ui/?secret=%s in your browser\n", finalconfig.Experimental.ClashAPI.Secret)
 
@@ -195,6 +185,21 @@ func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts 
 	}
 
 	return string(configStr), nil
+}
+
+func applyStandaloneExperimentalOptions(finalconfig *option.Options, hopts *config.HiddifyOptions) {
+	if finalconfig.Experimental == nil {
+		finalconfig.Experimental = &option.ExperimentalOptions{}
+	}
+	if finalconfig.Experimental.ClashAPI == nil {
+		finalconfig.Experimental.ClashAPI = &option.ClashAPIOptions{}
+	}
+	finalconfig.Experimental.ClashAPI.ExternalUI = "webui"
+	if hopts.AllowConnectionFromLAN {
+		finalconfig.Experimental.ClashAPI.ExternalController = "0.0.0.0:16756"
+	} else {
+		finalconfig.Experimental.ClashAPI.ExternalController = "127.0.0.1:16756"
+	}
 }
 
 func updateConfigInterval(ctx context.Context, current ConfigResult, hiddifySettingPath string, configPath string) {

@@ -283,12 +283,7 @@ func (h *HiddifyInstance) UrlTestActive() (*hcommon.Response, error) {
 			}, E.New("outbound not found in selector: ", config.OutboundSelectTag)
 		}
 		if outboundGroupInner, isLoaded := box.Outbound().Outbound(now); isLoaded {
-			if grp, isgrp := outboundGroupInner.(adapter.OutboundGroup); isgrp {
-				if n2 := grp.Now(); n2 != "" {
-					now = n2
-				}
-			}
-
+			now = urlTestTargetForSelectedOutbound(now, outboundGroupInner, h.UrlTestHistory())
 		}
 		return h.UrlTest(&UrlTestRequest{
 			Tag: now,
@@ -299,6 +294,40 @@ func (h *HiddifyInstance) UrlTestActive() (*hcommon.Response, error) {
 		Code:    hcommon.ResponseCode_OK,
 		Message: "",
 	}, nil
+}
+
+func urlTestTargetForSelectedOutbound(
+	selectedTag string,
+	selected adapter.Outbound,
+	history adapter.URLTestHistoryStorage,
+) string {
+	if selected == nil {
+		return selectedTag
+	}
+	if _, isGroup := selected.(adapter.OutboundGroup); isGroup {
+		if realTag := monitoring.RealTag(selected); realTag != "" && realTag != selectedTag {
+			if !hasSuccessfulURLTestHistory(history, realTag) {
+				return selectedTag
+			}
+			return realTag
+		}
+		return selectedTag
+	}
+	if realTag := monitoring.RealTag(selected); realTag != "" {
+		return realTag
+	}
+	return selectedTag
+}
+
+func hasSuccessfulURLTestHistory(history adapter.URLTestHistoryStorage, tag string) bool {
+	if history == nil || tag == "" {
+		return false
+	}
+	urlTestHistory := history.LoadURLTestHistory(tag)
+	if urlTestHistory == nil || urlTestHistory.IsFromCache {
+		return false
+	}
+	return urlTestHistory.Delay > 0 && urlTestHistory.Delay < monitoring.TimeoutDelay
 }
 
 func (h *HiddifyInstance) UrlTest(in *UrlTestRequest) (*hcommon.Response, error) {

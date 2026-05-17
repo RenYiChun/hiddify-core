@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 
 	"github.com/hiddify/hiddify-core/v2/config"
 	"github.com/hiddify/hiddify-core/v2/db"
@@ -37,6 +38,7 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 
 		// Log(LogLevel_DEBUG, LogType_CORE, "Building config ", string(hcontent))
 		// Log(LogLevel_DEBUG, LogType_CORE, "Building config ")
+		applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 		return config.BuildConfig(ctx, static.HiddifyOptions, readOpt)
 	}
 	return config.ReadSingOptions(ctx, readOpt)
@@ -58,6 +60,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		path = in.ConfigPath
 	}
 
+	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 	config, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: in.Content, Path: path}, true, static.HiddifyOptions, false)
 	if err != nil {
 		return &ParseResponse{
@@ -122,6 +125,7 @@ func ChangeHiddifySettings(in *ChangeHiddifySettingsRequest, insert bool) (*Core
 	if err != nil {
 		return nil, err
 	}
+	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 
 	if static.HiddifyOptions.Warp.WireguardConfigStr != "" {
 		err := json.Unmarshal([]byte(static.HiddifyOptions.Warp.WireguardConfigStr), &static.HiddifyOptions.Warp.WireguardConfig)
@@ -150,6 +154,7 @@ func GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateCo
 	if static.HiddifyOptions == nil {
 		static.HiddifyOptions = config.DefaultHiddifyOptions()
 	}
+	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 	config, err := config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: in.Path})
 	if err != nil {
 		return nil, err
@@ -158,6 +163,13 @@ func GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateCo
 	return &GenerateConfigResponse{
 		ConfigContent: string(config),
 	}, nil
+}
+
+func applyLocalDirectDomainSuffixRulesPath(hopt *config.HiddifyOptions) {
+	if hopt == nil || hopt.DirectDomainSuffixRulesPath != "" || sWorkingPath == "" {
+		return
+	}
+	hopt.DirectDomainSuffixRulesPath = filepath.Clean(config.DefaultDirectDomainSuffixRulesPath(sWorkingPath))
 }
 
 func removeTunnelIfNeeded(options *option.Options) (tuninb *option.TunInboundOptions) {

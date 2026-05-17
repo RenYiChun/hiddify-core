@@ -67,11 +67,14 @@ type URLTestOptions struct {
 }
 
 type RouteOptions struct {
-	ResolveDestination     bool                  `json:"resolve-destination,omitempty"`
-	IPv6Mode               option.DomainStrategy `json:"ipv6-mode,omitempty"`
-	BypassLAN              bool                  `json:"bypass-lan,omitempty"`
-	AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
-	BlockQuic              bool                  `json:"block-quic,omitempty"`
+	ResolveDestination          bool                  `json:"resolve-destination,omitempty"`
+	IPv6Mode                    option.DomainStrategy `json:"ipv6-mode,omitempty"`
+	BypassLAN                   bool                  `json:"bypass-lan,omitempty"`
+	AllowConnectionFromLAN      bool                  `json:"allow-connection-from-lan,omitempty"`
+	BlockQuic                   bool                  `json:"block-quic,omitempty"`
+	DirectDomainSuffixRulesPath string                `json:"direct-domain-suffix-rules-path,omitempty"`
+	DirectRouteConnectionLimit  int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
+	ProxyRouteConnectionLimit   int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
 }
 
 type TLSTricks struct {
@@ -105,6 +108,13 @@ type WarpOptions struct {
 	Account            WarpAccount
 }
 
+const DefaultBalancerStrategy = "round-robin"
+
+const (
+	DefaultDirectRouteConnectionLimit = 1024
+	DefaultProxyRouteConnectionLimit  = 256
+)
+
 func DefaultHiddifyOptions() *HiddifyOptions {
 	return &HiddifyOptions{
 		EnableNTP: true,
@@ -134,16 +144,19 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			// URLTestIdleTimeout: DurationInSeconds(6000),
 		},
 		RouteOptions: RouteOptions{
-			ResolveDestination:     false,
-			IPv6Mode:               option.DomainStrategy(dns.DomainStrategyAsIS),
-			BypassLAN:              false,
-			AllowConnectionFromLAN: false,
+			ResolveDestination:         false,
+			IPv6Mode:                   option.DomainStrategy(dns.DomainStrategyAsIS),
+			BypassLAN:                  false,
+			AllowConnectionFromLAN:     false,
+			DirectRouteConnectionLimit: DefaultDirectRouteConnectionLimit,
+			ProxyRouteConnectionLimit:  DefaultProxyRouteConnectionLimit,
 		},
 		LogLevel: "warn",
 		// LogFile:        "/dev/null",
-		LogFile:        "data/box.log",
-		Region:         "other",
-		EnableClashApi: true,
+		LogFile:          "data/box.log",
+		Region:           "other",
+		EnableClashApi:   true,
+		BalancerStrategy: DefaultBalancerStrategy,
 
 		ClashApiPort:   16756,
 		ClashApiSecret: "",

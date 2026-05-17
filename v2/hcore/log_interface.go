@@ -29,6 +29,10 @@ func (h *LogInterface) SetSystemProxyEnabled(enabled bool) error {
 	return nil
 }
 
+func (h *LogInterface) TriggerNativeCrash() error {
+	return nil
+}
+
 func (h *LogInterface) WriteDebugMessage(message string) {
 	h.WriteMessage(log.LevelDebug, message)
 }

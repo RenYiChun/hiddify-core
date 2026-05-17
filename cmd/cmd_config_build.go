@@ -141,6 +141,7 @@ func addHConfigFlags(commandRun *cobra.Command) {
 	commandRun.MarkFlagRequired("config")
 	commandRun.Flags().StringVarP(&hiddifySettingPath, "hiddify", "d", "", "Hiddify Setting JSON Path")
 	commandRun.Flags().BoolVar(&defaultConfigs.EnableFullConfig, "full-config", false, "allows including tags other than output")
+	commandRun.Flags().StringVar(&defaultConfigs.Region, "region", "other", "region code used for direct DNS and routing rules")
 	commandRun.Flags().StringVar(&defaultConfigs.LogLevel, "log", "warn", "log level")
 	commandRun.Flags().BoolVar(&defaultConfigs.InboundOptions.EnableTun, "tun", false, "Enable Tun")
 	commandRun.Flags().BoolVar(&defaultConfigs.InboundOptions.EnableTunService, "tun-service", false, "Enable Tun Service")

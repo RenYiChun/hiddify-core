@@ -3,11 +3,11 @@ package config
 import (
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	dnscode "github.com/miekg/dns"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -42,6 +42,10 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	if remoteAddr == fallbackAddr {
 		fallbackAddr = "https://1.0.0.1/dns-query"
 	}
+	remoteNoWarpAddr := opt.RemoteDnsAddress
+	if opt.EnableTun || opt.EnableTunService {
+		remoteNoWarpAddr = avoidPlainTCPIPDNS(remoteNoWarpAddr, fallbackAddr)
+	}
 
 	// if strings.HasPrefix(remoteAddr, "udp://") {
 	// 	remoteAddr = strings.Replace(remoteAddr, "udp://", "tcp://", 1)
@@ -55,17 +59,21 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	if err != nil {
 		return err
 	}
-	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, opt.RemoteDnsAddress, DNSDirectTag, OutboundWARPConfigDetour)
+	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, remoteNoWarpAddr, DNSDirectTag, OutboundWARPConfigDetour)
 	if err != nil {
 		return err
 	}
 
+	directAddr := opt.DirectDnsAddress
+	if opt.EnableTun || opt.EnableTunService {
+		directAddr = avoidPlainTCPIPDNS(directAddr, "")
+	}
 	direct_detour := OutboundDirectFragmentTag
-	if strings.HasPrefix(opt.DirectDnsAddress, "udp://") || !strings.Contains(opt.DirectDnsAddress, "://") {
+	if isDNSAddressIPLiteral(directAddr) {
 		direct_detour = ""
 	}
 
-	direct_dns, err := getDNSServerOptions(DNSDirectTag, opt.DirectDnsAddress, DNSLocalTag, direct_detour)
+	direct_dns, err := getDNSServerOptions(DNSDirectTag, directAddr, DNSLocalTag, direct_detour)
 	if err != nil {
 		return err
 	}
@@ -146,6 +154,35 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	// options.DNS.StaticIPs["api.ip.sb"] = []string{"www.speedtest.net", "cloudflare.com"}
 	return nil
 }
+
+func isDNSAddressIPLiteral(dnsAddress string) bool {
+	host, _ := getHostnameIfNotIP(dnsAddress)
+	return host == ""
+}
+
+func avoidPlainTCPIPDNS(dnsAddress string, fallbackAddress string) string {
+	if !isPlainTCPIPDNS(dnsAddress) {
+		return dnsAddress
+	}
+	if fallbackAddress != "" {
+		return fallbackAddress
+	}
+	serverURL, _ := url.Parse(dnsAddress)
+	return "udp://" + serverURL.Host
+}
+
+func isPlainTCPIPDNS(dnsAddress string) bool {
+	serverURL, err := url.Parse(dnsAddress)
+	if err != nil || serverURL == nil || serverURL.Scheme != C.DNSTypeTCP || serverURL.Host == "" {
+		return false
+	}
+	serverAddr := M.ParseSocksaddr(serverURL.Host)
+	if !serverAddr.IsValid() || !serverAddr.IsIP() {
+		return false
+	}
+	return serverAddr.Port == 0 || serverAddr.Port == 53
+}
+
 func getAllOutboundsOptions(options *option.Options) []any {
 	outbounds := []any{}
 	for _, o := range options.Outbounds {
@@ -156,8 +193,36 @@ func getAllOutboundsOptions(options *option.Options) []any {
 	}
 	return outbounds
 }
+
+func collectOutboundServerDomains(options *option.Options) []string {
+	if options == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, outbound := range getAllOutboundsOptions(options) {
+		server, ok := outbound.(option.ServerOptionsWrapper)
+		if !ok {
+			continue
+		}
+		host, err := getHostnameIfNotIP(server.TakeServerOptions().Server)
+		if err != nil || host == "" {
+			continue
+		}
+		seen[host] = struct{}{}
+	}
+	domains := make([]string, 0, len(seen))
+	for domain := range seen {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
 func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.DefaultDNSRule, error) {
 	dnsMap := make(map[string]string)
+	for _, domain := range collectOutboundServerDomains(options) {
+		dnsMap[domain] = ""
+	}
 	// outbounds := getAllOutboundsOptions(options)
 
 	// for _, outbound := range outbounds {
@@ -237,7 +302,7 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 				RouteOptions: option.DNSRouteActionOptions{
 					Server:         DNSRemoteNoWarpTag,
 					Strategy:       hopt.DirectDnsDomainStrategy,
-					BypassIfFailed: false,
+					BypassIfFailed: true,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 				},
 			},
@@ -266,10 +331,10 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 				DNSRuleAction: option.DNSRuleAction{
 					Action: C.RuleActionTypeRoute,
 					RouteOptions: option.DNSRouteActionOptions{
-						Server:         DNSMultiDirectTag,
+						Server:         directDNSRuleServer(hopt),
 						Strategy:       hopt.DirectDnsDomainStrategy,
 						RewriteTTL:     &DEFAULT_DNS_TTL,
-						BypassIfFailed: false,
+						BypassIfFailed: true,
 					},
 				},
 			},
@@ -434,28 +499,7 @@ func getDNSServerOptions(tag string, dnsurl string, domain_resolver string, deto
 
 		}
 	case "rcode":
-		var rcode int
-		if serverURL == nil {
-			return nil, E.New("invalid server address")
-		}
-		switch serverURL.Host {
-		case "success":
-			rcode = dnscode.RcodeSuccess
-		case "format_error":
-			rcode = dnscode.RcodeFormatError
-		case "server_failure":
-			rcode = dnscode.RcodeServerFailure
-		case "name_error":
-			rcode = dnscode.RcodeNameError
-		case "not_implemented":
-			rcode = dnscode.RcodeNotImplemented
-		case "refused":
-			rcode = dnscode.RcodeRefused
-		default:
-			return nil, E.New("unknown rcode: ", serverURL.Host)
-		}
-		o.Type = C.DNSTypeLegacyRcode
-		o.Options = rcode
+		return nil, E.New("rcode DNS server scheme is not supported by this sing-box version")
 	case C.DNSTypeDHCP:
 		o.Type = C.DNSTypeDHCP
 		dhcpOptions := option.DHCPDNSServerOptions{}

@@ -68,11 +68,15 @@ webui:
 windows-amd64: prepare
 	rm -rf $(BINDIR)/*
 	go run -v "github.com/sagernet/cronet-go/cmd/build-naive@$(CRONET_GO_VERSION)" extract-lib --target windows/amd64 -o $(BINDIR)/
+	if [ ! -f "$(BINDIR)/libcronet.dll" ]; then \
+		CRONET_LIB_DIR=$$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64); \
+		cp "$$CRONET_LIB_DIR/libcronet.dll" "$(BINDIR)/"; \
+	fi
 	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc  $(GOBUILDLIB) -tags $(TAGS),$(WINDOWS_ADD_TAGS)   -o $(BINDIR)/$(LIBNAME).dll ./platform/desktop
 	echo "core built, now building cli" 
 	ls -R $(BINDIR)/
 	go install -mod=readonly github.com/akavel/rsrc@latest ||echo "rsrc error in installation"
-	go run ./cli tunnel exit
+	go run ./cmd/main tunnel exit
 	cp $(BINDIR)/$(LIBNAME).dll ./$(LIBNAME).dll
 	$$(go env GOPATH)/bin/rsrc -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso ||echo "rsrc error in syso"
 	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
@@ -187,5 +191,3 @@ clean:
 release: # Create a new tag for release.	
 	@bash -c '.github/change_version.sh'
 	
-
-
