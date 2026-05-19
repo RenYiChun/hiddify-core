@@ -65,9 +65,6 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	}
 
 	directAddr := opt.DirectDnsAddress
-	if opt.EnableTun || opt.EnableTunService {
-		directAddr = avoidPlainTCPIPDNS(directAddr, "")
-	}
 	direct_detour := OutboundDirectFragmentTag
 	if isDNSAddressIPLiteral(directAddr) {
 		direct_detour = ""
@@ -323,21 +320,12 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 		domains = append(domains, domain)
 	}
 	if len(domains) > 0 {
-		forceDirectRules = append(forceDirectRules,
-			option.DefaultDNSRule{
-				RawDefaultDNSRule: option.RawDefaultDNSRule{
-					Domain: domains,
-				},
-				DNSRuleAction: option.DNSRuleAction{
-					Action: C.RuleActionTypeRoute,
-					RouteOptions: option.DNSRouteActionOptions{
-						Server:         directDNSRuleServer(hopt),
-						Strategy:       hopt.DirectDnsDomainStrategy,
-						RewriteTTL:     &DEFAULT_DNS_TTL,
-						BypassIfFailed: true,
-					},
-				},
+		forceDirectRules = appendDirectDNSRules(
+			forceDirectRules,
+			option.RawDefaultDNSRule{
+				Domain: domains,
 			},
+			hopt,
 		)
 		// forceDirectRules = append(forceDirectRules,
 		// 	option.DefaultDNSRule{

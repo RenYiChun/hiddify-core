@@ -5,6 +5,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -13,6 +14,7 @@ import (
 func startDynamicDirectBypassIfNeeded(options option.Options) {
 	stopDynamicDirectBypass(context.Background())
 	if runtime.GOOS != "windows" || !hasTunInbound(options) {
+		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
 		return
 	}
 	config := dynamicDirectBypassConfigFromOptions(options)
@@ -34,6 +36,7 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 	)
 	static.dynamicDirectBypassCancel = cancel
 	static.dynamicDirectBypass = manager
+	manager.restoreInitial(ctx, time.Now())
 	go manager.run(ctx, func() []dynamicDirectBypassConnection {
 		trafficManager := static.TrafficManager()
 		if trafficManager == nil {
@@ -41,7 +44,7 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 		}
 		return dynamicDirectBypassConnectionsFromTrackers(trafficManager.Connections())
 	})
-	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass started: threshold=", config.ActiveThreshold,
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass started: mode=all-direct",
 		" ttl=", config.RouteTTL, " maxRoutes=", config.MaxRoutes, " maxRoutesPerHost=", config.MaxRoutesPerHost)
 }
 
@@ -54,6 +57,23 @@ func stopDynamicDirectBypass(ctx context.Context) {
 		static.dynamicDirectBypass.close(ctx)
 		static.dynamicDirectBypass = nil
 	}
+	cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx)
+}
+
+func cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx context.Context) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	routeManager, err := newSystemDynamicDirectBypassRouteManager()
+	if err != nil {
+		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass cached route cleanup disabled: ", err)
+		return
+	}
+	cleanupDynamicDirectBypassCachedSystemRoutes(
+		ctx,
+		routeManager,
+		filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"),
+	)
 }
 
 func hasTunInbound(options option.Options) bool {

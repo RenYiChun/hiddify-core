@@ -6,10 +6,18 @@ import (
 	"strings"
 )
 
-const DirectDomainSuffixRulesRelativePath = "rules/direct-domain-suffixes.txt"
+const (
+	RulesRelativeDir                    = "rules"
+	DirectDomainSuffixRulesFileName     = "direct-domain-suffixes.txt"
+	DirectDomainSuffixRulesRelativePath = RulesRelativeDir + "/" + DirectDomainSuffixRulesFileName
+)
 
 func DefaultDirectDomainSuffixRulesPath(basePath string) string {
 	return filepath.Join(basePath, DirectDomainSuffixRulesRelativePath)
+}
+
+func DefaultCountryRuleSetPath(basePath string, tag string) string {
+	return filepath.Join(basePath, RulesRelativeDir, tag+".srs")
 }
 
 func DefaultDirectDomainSuffixRules() []string {

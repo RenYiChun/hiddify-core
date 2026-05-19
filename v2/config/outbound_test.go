@@ -84,6 +84,43 @@ func TestSetOutboundsDefaultsBalanceStrategy(t *testing.T) {
 	t.Fatal("expected balance outbound to be generated")
 }
 
+func TestSetOutboundsGeneratedBalancersDoNotInterruptExistingConnections(t *testing.T) {
+	var options option.Options
+	staticIPs := map[string][]string{}
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type:    C.TypeDirect,
+				Tag:     "proxy-a",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "proxy-b",
+				Options: &option.DirectOutboundOptions{},
+			},
+		},
+	}
+
+	if err := setOutbounds(&options, input, &HiddifyOptions{}, &staticIPs); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tag := range []string{OutboundURLTestTag, OutboundRoundRobinTag} {
+		outbound := findTestOutbound(options.Outbounds, tag)
+		if outbound == nil {
+			t.Fatalf("expected %q outbound to be generated", tag)
+		}
+		balancerOptions, ok := outbound.Options.(*option.BalancerOutboundOptions)
+		if !ok {
+			t.Fatalf("expected balancer options for %q, got %T", tag, outbound.Options)
+		}
+		if balancerOptions.InterruptExistConnections {
+			t.Fatalf("expected generated balancer %q not to interrupt existing connections", tag)
+		}
+	}
+}
+
 func TestSetOutboundsAddsDirectConnectTimeouts(t *testing.T) {
 	var options option.Options
 	staticIPs := map[string][]string{}
@@ -120,4 +157,13 @@ func TestSetOutboundsAddsDirectConnectTimeouts(t *testing.T) {
 			t.Fatalf("expected %q outbound to be generated", tag)
 		}
 	}
+}
+
+func findTestOutbound(outbounds []option.Outbound, tag string) *option.Outbound {
+	for i := range outbounds {
+		if outbounds[i].Tag == tag {
+			return &outbounds[i]
+		}
+	}
+	return nil
 }

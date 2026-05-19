@@ -44,7 +44,6 @@ func (f fakeDynamicDirectBypassDNSCacheReader) LookupCachedHostIPs(
 func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  3,
 		MaxRoutesPerHost: 4,
 	}
 	connections := []dynamicDirectBypassConnection{
@@ -67,10 +66,44 @@ func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
 	}
 }
 
-func TestSelectDynamicDirectBypassCandidatesIgnoresUnsafeAndNonDirectTraffic(t *testing.T) {
+func TestSelectDynamicDirectBypassCandidatesSelectsEveryDirectDestination(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  2,
+		MaxRoutesPerHost: 4,
+	}
+	connections := []dynamicDirectBypassConnection{
+		hotDirectConnection("low.example.cn", "101.226.99.155"),
+		{
+			Destination:  netip.MustParseAddr("93.184.216.34"),
+			Outbound:     "direct §hide§",
+			OutboundType: "direct",
+			Chain:        []string{"direct §hide§"},
+		},
+		{
+			Host:         "proxied.example.com",
+			Destination:  netip.MustParseAddr("140.82.112.4"),
+			Outbound:     "select",
+			OutboundType: "vmess",
+			Chain:        []string{"select", "proxy"},
+		},
+	}
+
+	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+
+	if len(candidates) != 2 {
+		t.Fatalf("expected two direct dynamic bypass candidates, got %#v", candidates)
+	}
+	if candidates[0].Host != "93.184.216.34" || !containsAddr(candidates[0].IPs, netip.MustParseAddr("93.184.216.34")) {
+		t.Fatalf("expected hostless direct destination candidate, got %#v", candidates[0])
+	}
+	if candidates[1].Host != "low.example.cn" || !containsAddr(candidates[1].IPs, netip.MustParseAddr("101.226.99.155")) {
+		t.Fatalf("expected low-count direct host candidate, got %#v", candidates[1])
+	}
+}
+
+func TestSelectDynamicDirectBypassCandidatesIgnoresUnsafeProtectedAndNonDirectTraffic(t *testing.T) {
+	cfg := dynamicDirectBypassConfig{
+		Enabled:          true,
 		MaxRoutesPerHost: 4,
 	}
 	protected := map[netip.Addr]struct{}{
@@ -98,15 +131,17 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresUnsafeAndNonDirectTraffic(t *
 
 	candidates := selectDynamicDirectBypassCandidates(connections, cfg, protected)
 
-	if len(candidates) != 0 {
-		t.Fatalf("expected no candidates for low-count, unsafe, protected, or proxied traffic, got %#v", candidates)
+	if len(candidates) != 1 {
+		t.Fatalf("expected only the routeable direct candidate, got %#v", candidates)
+	}
+	if candidates[0].Host != "low.example.cn" || !containsAddr(candidates[0].IPs, netip.MustParseAddr("101.226.99.155")) {
+		t.Fatalf("expected low-count public direct traffic to be selected, got %#v", candidates[0])
 	}
 }
 
 func TestSelectDynamicDirectBypassCandidatesEagerSuffixDoesNotWaitForHotThreshold(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  64,
 		MaxRoutesPerHost: 4,
 		EagerSuffixes:    []string{"myqcloud.com"},
 	}
@@ -130,7 +165,6 @@ func TestSelectDynamicDirectBypassCandidatesEagerSuffixDoesNotWaitForHotThreshol
 func TestSelectDynamicDirectBypassCandidatesDoesNotTreatProxyTagContainingDirectAsDirect(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  2,
 		MaxRoutesPerHost: 4,
 	}
 	connections := []dynamicDirectBypassConnection{
@@ -185,6 +219,29 @@ func TestDynamicDirectBypassManagerAppliesRoutesOnceAndExpiresThem(t *testing.T)
 	}
 }
 
+func TestDynamicDirectBypassManagerRefreshesExistingRouteAtMaxRoutes(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        1,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, "")
+	candidate := dynamicDirectBypassCandidate{
+		Host: "cube.weixinbridge.com",
+		IPs:  []netip.Addr{netip.MustParseAddr("101.226.99.155")},
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(time.Minute))
+	manager.cleanupExpired(context.Background(), now.Add(5*time.Minute+30*time.Second))
+
+	if len(routeManager.deleted) != 0 {
+		t.Fatalf("expected refreshed route to remain active at max routes, got deletions: %#v", routeManager.deleted)
+	}
+}
+
 func TestDynamicDirectBypassManagerPreservesCacheOnCloseAndDeletesRoutes(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
@@ -209,6 +266,38 @@ func TestDynamicDirectBypassManagerPreservesCacheOnCloseAndDeletesRoutes(t *test
 	cached := readDynamicDirectBypassCache(t, cachePath)
 	if len(cached) != 1 || cached[0].IP != "101.226.99.155" {
 		t.Fatalf("expected close to preserve cache for next start, got %#v", cached)
+	}
+}
+
+func TestDynamicDirectBypassManagerPersistsProcessMetadata(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, cachePath)
+	candidates := selectDynamicDirectBypassCandidates([]dynamicDirectBypassConnection{
+		{
+			Host:         "docs.qq.com",
+			Destination:  netip.MustParseAddr("43.154.240.12"),
+			Outbound:     "direct §hide§",
+			OutboundType: "direct",
+			Chain:        []string{"direct §hide§"},
+			ProcessPath:  `C:\Program Files\Tencent\WeCom\WXWork.exe`,
+		},
+	}, manager.config, nil)
+
+	manager.applyCandidates(context.Background(), candidates, now)
+
+	cached := readDynamicDirectBypassCache(t, cachePath)
+	if len(cached) != 1 {
+		t.Fatalf("expected one cached route, got %#v", cached)
+	}
+	if cached[0].ProcessName != "WXWork.exe" || cached[0].ProcessPath != `C:\Program Files\Tencent\WeCom\WXWork.exe` {
+		t.Fatalf("expected process metadata in cache, got %#v", cached[0])
 	}
 }
 
@@ -244,12 +333,37 @@ func TestDynamicDirectBypassManagerDeletesExpiredCachedRoutesOnLoad(t *testing.T
 	}
 }
 
+func TestCleanupDynamicDirectBypassCachedSystemRoutesDeletesCachedRoutesWithoutStarting(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	writeDynamicDirectBypassCache(t, cachePath, []dynamicDirectBypassRoute{
+		{
+			Host:      "auth.huaweicloud.com",
+			IP:        "117.78.12.125",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+		{
+			Host:      "invalid.example.com",
+			IP:        "not-an-ip",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+	})
+
+	cleanupDynamicDirectBypassCachedSystemRoutes(context.Background(), routeManager, cachePath)
+
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != netip.MustParseAddr("117.78.12.125") {
+		t.Fatalf("expected cached system route to be deleted, got %#v", routeManager.deleted)
+	}
+}
+
 func TestDynamicDirectBypassManagerResolvesHotDomainWhenObservedIPIsMissing(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
 	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  2,
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
@@ -279,12 +393,66 @@ func TestDynamicDirectBypassManagerResolvesHotDomainWhenObservedIPIsMissing(t *t
 	}
 }
 
+func TestDynamicDirectBypassManagerDoesNotResolveObservedNonEagerHost(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, fakeDynamicDirectBypassResolver{
+		"docs.qq.com": {
+			netip.MustParseAddr("43.154.240.12"),
+			netip.MustParseAddr("43.154.240.13"),
+		},
+	}, nil, "")
+	candidate := dynamicDirectBypassCandidate{
+		Host: "docs.qq.com",
+		IPs:  []netip.Addr{netip.MustParseAddr("43.154.240.12")},
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != netip.MustParseAddr("43.154.240.12") {
+		t.Fatalf("expected only observed IP to be added, got %#v", routeManager.added)
+	}
+}
+
+func TestDynamicDirectBypassManagerResolvesObservedEagerHost(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"myqcloud.com"},
+	}, routeManager, fakeDynamicDirectBypassResolver{
+		"wework-weipan-1258344707.cos.ap-guangzhou.myqcloud.com": {
+			netip.MustParseAddr("183.60.116.3"),
+			netip.MustParseAddr("183.60.116.4"),
+		},
+	}, nil, "")
+	candidate := dynamicDirectBypassCandidate{
+		Host: "wework-weipan-1258344707.cos.ap-guangzhou.myqcloud.com",
+		IPs:  []netip.Addr{netip.MustParseAddr("183.60.116.3")},
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(routeManager.added) != 2 ||
+		!containsAddr(routeManager.added, netip.MustParseAddr("183.60.116.3")) ||
+		!containsAddr(routeManager.added, netip.MustParseAddr("183.60.116.4")) {
+		t.Fatalf("expected eager host to include resolved IPs, got %#v", routeManager.added)
+	}
+}
+
 func TestDynamicDirectBypassManagerAppliesDNSCacheCandidatesForEagerSuffixes(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
 	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
 		Enabled:          true,
-		ActiveThreshold:  64,
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
@@ -303,10 +471,44 @@ func TestDynamicDirectBypassManagerAppliesDNSCacheCandidatesForEagerSuffixes(t *
 	}
 }
 
+func TestDynamicDirectBypassManagerRestoresInitialRoutesOnlyOnce(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	writeDynamicDirectBypassCache(t, cachePath, []dynamicDirectBypassRoute{
+		{
+			Host:      "auth.huaweicloud.com",
+			IP:        "117.78.12.125",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+	})
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"huaweicloud.com"},
+	}, routeManager, nil, fakeDynamicDirectBypassDNSCacheReader{
+		{
+			Host: "auth.huaweicloud.com",
+			IPs:  []netip.Addr{netip.MustParseAddr("49.4.112.125")},
+		},
+	}, cachePath)
+
+	manager.restoreInitial(context.Background(), now)
+	manager.restoreInitial(context.Background(), now.Add(time.Second))
+
+	if len(routeManager.added) != 2 ||
+		!containsAddr(routeManager.added, netip.MustParseAddr("117.78.12.125")) ||
+		!containsAddr(routeManager.added, netip.MustParseAddr("49.4.112.125")) {
+		t.Fatalf("expected cached and DNS routes to be restored once, got %#v", routeManager.added)
+	}
+}
+
 func TestDynamicDirectBypassConfigFromOptionsReadsCustomValues(t *testing.T) {
 	custom := map[string]any{
 		customDynamicDirectBypassEnabledKey:       false,
-		customDynamicDirectBypassThresholdKey:     64,
 		customDynamicDirectBypassTTLKey:           900,
 		customDynamicDirectBypassMaxRoutesKey:     128,
 		customDynamicDirectBypassMaxRoutesHostKey: 16,
@@ -317,9 +519,19 @@ func TestDynamicDirectBypassConfigFromOptionsReadsCustomValues(t *testing.T) {
 	if config.Enabled {
 		t.Fatal("expected dynamic direct bypass to be disabled from custom option")
 	}
-	if config.ActiveThreshold != 64 || config.RouteTTL != 15*time.Minute ||
-		config.MaxRoutes != 128 || config.MaxRoutesPerHost != 16 {
+	if config.RouteTTL != 15*time.Minute || config.MaxRoutes != 128 || config.MaxRoutesPerHost != 16 {
 		t.Fatalf("unexpected dynamic direct bypass config: %#v", config)
+	}
+}
+
+func TestDefaultDynamicDirectBypassConfigScansConnectionsFasterThanDNSCache(t *testing.T) {
+	config := defaultDynamicDirectBypassConfig()
+
+	if config.SampleInterval != time.Second {
+		t.Fatalf("expected direct connection scan interval to be 1s, got %s", config.SampleInterval)
+	}
+	if config.DNSCacheInterval != 5*time.Second {
+		t.Fatalf("expected DNS cache scan interval to stay 5s, got %s", config.DNSCacheInterval)
 	}
 }
 

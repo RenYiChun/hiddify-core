@@ -42,36 +42,98 @@ func (windowsDynamicDirectBypassDNSCacheReader) LookupCachedHostIPs(
 	if err := json.Unmarshal(bytes.TrimSpace(output), &entries); err != nil {
 		return nil, fmt.Errorf("parse dns cache failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
+	return dynamicDirectBypassCandidatesFromDNSCacheEntries(entries, suffixes), nil
+}
+
+func dynamicDirectBypassCandidatesFromDNSCacheEntries(
+	entries []windowsDynamicDirectBypassDNSCacheEntry,
+	suffixes []string,
+) []dynamicDirectBypassCandidate {
+	suffixes = normalizeDynamicDirectBypassSuffixes(suffixes)
+	if len(suffixes) == 0 {
+		return nil
+	}
 	hosts := map[string]map[netip.Addr]struct{}{}
+	cnames := map[string][]string{}
 	for _, entry := range entries {
 		host := normalizeDynamicDirectBypassHost(entry.Entry)
-		if host == "" || !matchesDynamicDirectBypassSuffix(host, suffixes) {
+		if host == "" {
 			continue
 		}
-		ip, err := netip.ParseAddr(strings.TrimSpace(entry.Data))
-		if err != nil || !isDynamicDirectBypassRouteIP(ip, nil) {
+		data := strings.TrimSpace(entry.Data)
+		if ip, err := netip.ParseAddr(data); err == nil {
+			if !isDynamicDirectBypassRouteIP(ip, nil) {
+				continue
+			}
+			if hosts[host] == nil {
+				hosts[host] = map[netip.Addr]struct{}{}
+			}
+			hosts[host][ip] = struct{}{}
 			continue
 		}
-		if hosts[host] == nil {
-			hosts[host] = map[netip.Addr]struct{}{}
+		target := normalizeDynamicDirectBypassHost(data)
+		if target == "" {
+			continue
 		}
-		hosts[host][ip] = struct{}{}
+		cnames[host] = append(cnames[host], target)
 	}
-	candidates := make([]dynamicDirectBypassCandidate, 0, len(hosts))
-	for host, hostIPs := range hosts {
-		ips := make([]netip.Addr, 0, len(hostIPs))
-		for ip := range hostIPs {
-			ips = append(ips, ip)
-		}
+	candidates := make([]dynamicDirectBypassCandidate, 0, len(hosts)+len(cnames))
+	for host := range eagerDNSCacheHosts(hosts, cnames, suffixes) {
+		ips := collectDNSCacheHostIPs(host, hosts, cnames, map[string]struct{}{})
 		sortAddrSlice(ips)
 		candidates = append(candidates, dynamicDirectBypassCandidate{Host: host, IPs: ips})
 	}
 	sortDynamicDirectBypassCandidates(candidates)
-	return candidates, nil
+	return candidates
+}
+
+func eagerDNSCacheHosts(
+	hosts map[string]map[netip.Addr]struct{},
+	cnames map[string][]string,
+	suffixes []string,
+) map[string]struct{} {
+	result := map[string]struct{}{}
+	for host := range hosts {
+		if matchesDynamicDirectBypassSuffix(host, suffixes) {
+			result[host] = struct{}{}
+		}
+	}
+	for host := range cnames {
+		if matchesDynamicDirectBypassSuffix(host, suffixes) {
+			result[host] = struct{}{}
+		}
+	}
+	return result
+}
+
+func collectDNSCacheHostIPs(
+	host string,
+	hosts map[string]map[netip.Addr]struct{},
+	cnames map[string][]string,
+	visited map[string]struct{},
+) []netip.Addr {
+	if _, exists := visited[host]; exists {
+		return nil
+	}
+	visited[host] = struct{}{}
+	seen := map[netip.Addr]struct{}{}
+	for ip := range hosts[host] {
+		seen[ip] = struct{}{}
+	}
+	for _, target := range cnames[host] {
+		for _, ip := range collectDNSCacheHostIPs(target, hosts, cnames, visited) {
+			seen[ip] = struct{}{}
+		}
+	}
+	ips := make([]netip.Addr, 0, len(seen))
+	for ip := range seen {
+		ips = append(ips, ip)
+	}
+	return ips
 }
 
 func windowsDNSCacheDiscoveryScript() string {
 	return `ConvertTo-Json -InputObject @(Get-DnsClientCache | ` +
-		`Where-Object { $_.Status -eq 0 -and $_.Data -match '^\d{1,3}(\.\d{1,3}){3}$' } | ` +
+		`Where-Object { $_.Status -eq 0 -and $_.Data } | ` +
 		`Select-Object Entry, Data) -Compress`
 }

@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	sync "sync"
@@ -153,12 +155,29 @@ func setTunRouteExcludes(options *option.Options, hopt *HiddifyOptions) {
 
 func collectTunRouteExcludeAddresses(options *option.Options, hopt *HiddifyOptions) []netip.Prefix {
 	seen := map[string]netip.Prefix{}
+	addPrefix := func(prefixString string) {
+		prefix, err := netip.ParsePrefix(prefixString)
+		if err != nil {
+			return
+		}
+		seen[prefix.String()] = prefix
+	}
 	addAddress := func(address string) {
 		prefix, ok := routeExcludePrefixFromAddress(address)
 		if !ok {
 			return
 		}
 		seen[prefix.String()] = prefix
+	}
+
+	if hopt.BypassLAN {
+		for _, prefix := range []string{
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+		} {
+			addPrefix(prefix)
+		}
 	}
 
 	addAddress(hopt.DirectDnsAddress)
@@ -224,7 +243,6 @@ const (
 	customRouteDirectConnectionLimitKey       = "hiddify-route-direct-connection-limit"
 	customRouteProxyConnectionLimitKey        = "hiddify-route-proxy-connection-limit"
 	customDynamicDirectBypassEnabledKey       = "hiddify-dynamic-direct-bypass-enabled"
-	customDynamicDirectBypassThresholdKey     = "hiddify-dynamic-direct-bypass-threshold"
 	customDynamicDirectBypassTTLKey           = "hiddify-dynamic-direct-bypass-ttl"
 	customDynamicDirectBypassMaxRoutesKey     = "hiddify-dynamic-direct-bypass-max-routes"
 	customDynamicDirectBypassMaxRoutesHostKey = "hiddify-dynamic-direct-bypass-max-routes-per-host"
@@ -250,10 +268,6 @@ func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
 		DefaultProxyRouteConnectionLimit,
 	)
 	custom[customDynamicDirectBypassEnabledKey] = hopt.EnableDynamicDirectBypass
-	custom[customDynamicDirectBypassThresholdKey] = normalizePositiveInt(
-		hopt.DynamicDirectBypassThreshold,
-		DefaultDynamicDirectBypassThreshold,
-	)
 	custom[customDynamicDirectBypassTTLKey] = normalizePositiveInt(
 		int(hopt.DynamicDirectBypassTTL),
 		int(DefaultDynamicDirectBypassTTL),
@@ -439,7 +453,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			// IdleTimeout: badoption.Duration(opt.URLTestIdleTimeout.Duration()),
 			Tolerance: 1,
 			// IdleTimeout:               badoption.Duration(opt.URLTestInterval.Duration().Nanoseconds() * 3),
-			InterruptExistConnections: true,
+			InterruptExistConnections: false,
 		},
 	}
 
@@ -461,7 +475,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			// IdleTimeout: badoption.Duration(opt.URLTestIdleTimeout.Duration()),
 			Tolerance: 1,
 			// IdleTimeout:               badoption.Duration(opt.URLTestInterval.Duration().Nanoseconds() * 3),
-			InterruptExistConnections: true,
+			InterruptExistConnections: false,
 		},
 	}
 	defaultSelect := tags[0]
@@ -637,11 +651,44 @@ func defaultDomainResolverServer(hopt *HiddifyOptions) string {
 	return DNSMultiDirectTag
 }
 
-func directDNSRuleServer(hopt *HiddifyOptions) string {
-	if hopt.EnableTun || hopt.EnableTunService {
-		return DNSLocalTag
+func directDNSRuleServers(hopt *HiddifyOptions) []string {
+	return []string{DNSMultiDirectTag}
+}
+
+func appendDirectDNSRules(
+	dnsRules []option.DefaultDNSRule,
+	rawRule option.RawDefaultDNSRule,
+	hopt *HiddifyOptions,
+) []option.DefaultDNSRule {
+	return appendDirectDNSRulesWithTerminalFallback(dnsRules, rawRule, hopt, false)
+}
+
+func appendDirectDNSRulesWithTerminalFallback(
+	dnsRules []option.DefaultDNSRule,
+	rawRule option.RawDefaultDNSRule,
+	hopt *HiddifyOptions,
+	terminalBypassIfFailed bool,
+) []option.DefaultDNSRule {
+	servers := directDNSRuleServers(hopt)
+	for index, server := range servers {
+		bypassIfFailed := true
+		if index == len(servers)-1 {
+			bypassIfFailed = terminalBypassIfFailed
+		}
+		dnsRules = append(dnsRules, option.DefaultDNSRule{
+			RawDefaultDNSRule: rawRule,
+			DNSRuleAction: option.DNSRuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.DNSRouteActionOptions{
+					Server:         server,
+					Strategy:       hopt.DirectDnsDomainStrategy,
+					RewriteTTL:     &DEFAULT_DNS_TTL,
+					BypassIfFailed: bypassIfFailed,
+				},
+			},
+		})
 	}
-	return DNSMultiDirectTag
+	return dnsRules
 }
 
 var defaultDirectDomainSuffixRules = []string{
@@ -657,6 +704,24 @@ var defaultDirectDomainSuffixRules = []string{
 	"gtimg.com",
 	"myqcloud.com",
 	"qcloud.com",
+	"huaweicloud.com",
+	"myhuaweicloud.com",
+	"huaweicloudapis.com",
+	"huaweicloudwaf.com",
+	"huaweicloud.ru",
+	"huawei.com",
+	"hicloud.com",
+	"vmall.com",
+	"hc-cdn.com",
+	"hc-cdn.cn",
+	"cdnhwc1.com",
+	"cdnhwc2.com",
+	"dbankcloud.cn",
+	"dbankcloud.com",
+	"dbankcloud.asia",
+	"dbankcloud.eu",
+	"globalsign.com",
+	"globalsigncdn.com",
 }
 
 func appendDirectDomainSuffixRules(
@@ -668,20 +733,13 @@ func appendDirectDomainSuffixRules(
 	if len(domainSuffixes) == 0 {
 		return dnsRules, routeRules
 	}
-	dnsRules = append(dnsRules, option.DefaultDNSRule{
-		RawDefaultDNSRule: option.RawDefaultDNSRule{
+	dnsRules = appendDirectDNSRules(
+		dnsRules,
+		option.RawDefaultDNSRule{
 			DomainSuffix: domainSuffixes,
 		},
-		DNSRuleAction: option.DNSRuleAction{
-			Action: C.RuleActionTypeRoute,
-			RouteOptions: option.DNSRouteActionOptions{
-				Server:         directDNSRuleServer(hopt),
-				Strategy:       hopt.DirectDnsDomainStrategy,
-				RewriteTTL:     &DEFAULT_DNS_TTL,
-				BypassIfFailed: true,
-			},
-		},
-	})
+		hopt,
+	)
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
 		DefaultOptions: option.DefaultRule{
@@ -1010,21 +1068,13 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 
 	if len(forceDirectRoute) > 0 {
 
-		dnsRules = append(dnsRules, option.DefaultDNSRule{
-			RawDefaultDNSRule: option.RawDefaultDNSRule{
+		dnsRules = appendDirectDNSRules(
+			dnsRules,
+			option.RawDefaultDNSRule{
 				Domain: forceDirectRoute,
 			},
-			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:         directDNSRuleServer(hopt),
-					Strategy:       hopt.DirectDnsDomainStrategy,
-					RewriteTTL:     &DEFAULT_DNS_TTL,
-					DisableCache:   false,
-					BypassIfFailed: true,
-				},
-			},
-		})
+			hopt,
+		)
 		routeRules = append(routeRules, option.Rule{
 			Type: C.RuleTypeDefault,
 			DefaultOptions: option.DefaultRule{
@@ -1150,20 +1200,13 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		})
 	}
 	if hopt.Region != "other" {
-		dnsRules = append(dnsRules, option.DefaultDNSRule{
-			RawDefaultDNSRule: option.RawDefaultDNSRule{
+		dnsRules = appendDirectDNSRules(
+			dnsRules,
+			option.RawDefaultDNSRule{
 				DomainSuffix: []string{"." + hopt.Region},
 			},
-			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:         directDNSRuleServer(hopt),
-					Strategy:       hopt.DirectDnsDomainStrategy,
-					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: true,
-				},
-			},
-		})
+			hopt,
+		)
 		routeRules = append(routeRules, option.Rule{
 			Type: C.RuleTypeDefault,
 			DefaultOptions: option.DefaultRule{
@@ -1179,48 +1222,22 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 
-		dnsRules = append(dnsRules, option.DefaultDNSRule{
-			RawDefaultDNSRule: option.RawDefaultDNSRule{
-
+		dnsRules = appendDirectDNSRules(
+			dnsRules,
+			option.RawDefaultDNSRule{
 				RuleSet: []string{
 					"geosite-" + hopt.Region,
 				},
 			},
-			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:         directDNSRuleServer(hopt),
-					Strategy:       hopt.DirectDnsDomainStrategy,
-					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: true,
-				},
-			},
-		})
+			hopt,
+		)
 
 		regionRouteSets := []string{"geosite-" + hopt.Region}
 		if !hopt.EnableTun && !hopt.EnableTunService {
 			regionRouteSets = append([]string{"geoip-" + hopt.Region}, regionRouteSets...)
-			rulesets = append(rulesets, option.RuleSet{
-				Type:   C.RuleSetTypeRemote,
-				Tag:    "geoip-" + hopt.Region,
-				Format: C.RuleSetFormatBinary,
-				RemoteOptions: option.RemoteRuleSet{
-					URL:            "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geoip-" + hopt.Region + ".srs",
-					UpdateInterval: badoption.Duration(5 * time.Hour * 24),
-					DownloadDetour: OutboundSelectTag,
-				},
-			})
+			rulesets = append(rulesets, makeCountryRuleSet("geoip-"+hopt.Region, hopt))
 		}
-		rulesets = append(rulesets, option.RuleSet{
-			Type:   C.RuleSetTypeRemote,
-			Tag:    "geosite-" + hopt.Region,
-			Format: C.RuleSetFormatBinary,
-			RemoteOptions: option.RemoteRuleSet{
-				URL:            "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geosite-" + hopt.Region + ".srs",
-				UpdateInterval: badoption.Duration(5 * time.Hour * 24),
-				DownloadDetour: OutboundSelectTag,
-			},
-		})
+		rulesets = append(rulesets, makeCountryRuleSet("geosite-"+hopt.Region, hopt))
 
 		routeRules = append(routeRules, option.Rule{
 			Type: C.RuleTypeDefault,
@@ -1263,7 +1280,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		},
 		// OverrideAndroidVPN: hopt.EnableTun && C.IsAndroid,
 		RuleSet:     rulesets,
-		FindProcess: false,
+		FindProcess: C.IsWindows && (hopt.EnableTun || hopt.EnableTunService) && hopt.EnableDynamicDirectBypass,
 		// GeoIP: &option.GeoIPOptions{
 		// 	Path: opt.GeoIPPath,
 		// },
@@ -1378,6 +1395,43 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 	}
 	// }
 	return nil
+}
+
+func makeCountryRuleSet(tag string, hopt *HiddifyOptions) option.RuleSet {
+	if filePath, configPath := localCountryRuleSetPaths(tag, hopt); filePath != "" && localRuleSetFileExists(filePath) {
+		return option.RuleSet{
+			Type:   C.RuleSetTypeLocal,
+			Tag:    tag,
+			Format: C.RuleSetFormatBinary,
+			LocalOptions: option.LocalRuleSet{
+				Path: configPath,
+			},
+		}
+	}
+	return option.RuleSet{
+		Type:   C.RuleSetTypeRemote,
+		Tag:    tag,
+		Format: C.RuleSetFormatBinary,
+		RemoteOptions: option.RemoteRuleSet{
+			URL:            "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/" + tag + ".srs",
+			UpdateInterval: badoption.Duration(5 * time.Hour * 24),
+			DownloadDetour: OutboundSelectTag,
+		},
+	}
+}
+
+func localCountryRuleSetPaths(tag string, hopt *HiddifyOptions) (string, string) {
+	if hopt == nil || hopt.DirectDomainSuffixRulesPath == "" {
+		return "", ""
+	}
+	filePath := filepath.Clean(filepath.Join(filepath.Dir(hopt.DirectDomainSuffixRulesPath), tag+".srs"))
+	configPath := filepath.ToSlash(filepath.Join(RulesRelativeDir, tag+".srs"))
+	return filePath, configPath
+}
+
+func localRuleSetFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
 func patchHiddifyWarpFromConfig(out *option.Outbound, opt HiddifyOptions) *option.Outbound {

@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -102,7 +103,6 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 	hopt := &HiddifyOptions{
 		RouteOptions: RouteOptions{
 			EnableDynamicDirectBypass:        true,
-			DynamicDirectBypassThreshold:     64,
 			DynamicDirectBypassTTL:           DurationInSeconds(900),
 			DynamicDirectBypassMaxRoutes:     128,
 			DynamicDirectBypassMaxRoutesHost: 16,
@@ -117,9 +117,6 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 	custom := *options.Custom
 	if got := custom[customDynamicDirectBypassEnabledKey]; got != true {
 		t.Fatalf("expected dynamic direct bypass enabled, got %#v", got)
-	}
-	if got := custom[customDynamicDirectBypassThresholdKey]; got != 64 {
-		t.Fatalf("expected threshold 64, got %#v", got)
 	}
 	if got := custom[customDynamicDirectBypassTTLKey]; got != 900 {
 		t.Fatalf("expected ttl 900, got %#v", got)
@@ -136,5 +133,23 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 	}
 	if !containsString(suffixes, "myqcloud.com") || !containsString(suffixes, "weixinbridge.com") {
 		t.Fatalf("expected eager suffixes to include WeCom document domains, got %#v", suffixes)
+	}
+}
+
+func TestSetRoutingOptionsEnablesFindProcessForWindowsDynamicBypassTun(t *testing.T) {
+	options := option.Options{DNS: &option.DNSOptions{}}
+	hopt := DefaultHiddifyOptions()
+	hopt.EnableTun = true
+	hopt.EnableDynamicDirectBypass = true
+
+	if err := setRoutingOptions(&options, hopt); err != nil {
+		t.Fatal(err)
+	}
+
+	if options.Route == nil {
+		t.Fatal("expected route options")
+	}
+	if options.Route.FindProcess != C.IsWindows {
+		t.Fatalf("expected FindProcess=%v for dynamic direct bypass TUN, got %v", C.IsWindows, options.Route.FindProcess)
 	}
 }

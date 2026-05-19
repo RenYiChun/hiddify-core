@@ -62,6 +62,20 @@ func TestSetInboundExcludesOutboundServerIPsFromTunRoutes(t *testing.T) {
 	}
 }
 
+func TestSetInboundExcludesPrivateIPv4RangesFromTunRoutesWhenBypassLAN(t *testing.T) {
+	tunOptions := buildTunInboundWithBypassLAN(t)
+
+	for _, expected := range []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	} {
+		if !hasRouteExclude(tunOptions.RouteExcludeAddress, expected) {
+			t.Fatalf("expected private LAN range %s to be excluded from TUN routes, got %v", expected, tunOptions.RouteExcludeAddress)
+		}
+	}
+}
+
 func TestSetInboundOmitsIPv6AddressWhenIPv6ModeIsIPv4Only(t *testing.T) {
 	tunOptions := buildTunInboundWithIPv6Mode(t, "https://223.5.5.5/dns-query", option.DomainStrategy(dns.DomainStrategyUseIPv4))
 
@@ -139,6 +153,28 @@ func buildTunInboundWithOutbounds(t *testing.T, directDNSAddress string, outboun
 	if err := setOutbounds(&options, &option.Options{Outbounds: outbounds}, hopt, &staticIPs); err != nil {
 		t.Fatal(err)
 	}
+	setTunRouteExcludes(&options, hopt)
+	return findTunInbound(t, &options)
+}
+
+func buildTunInboundWithBypassLAN(t *testing.T) *option.TunInboundOptions {
+	t.Helper()
+
+	var options option.Options
+	hopt := &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsAddress: "https://dns.alidns.com/dns-query",
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+			TUNStack:  "mixed",
+			MTU:       9000,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+	}
+	setInbound(&options, hopt)
 	setTunRouteExcludes(&options, hopt)
 	return findTunInbound(t, &options)
 }

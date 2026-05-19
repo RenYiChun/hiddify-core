@@ -43,15 +43,15 @@ func TestSetDnsKeepsFragmentForDirectDomainDoH(t *testing.T) {
 	}
 }
 
-func TestSetDnsAvoidsPlainTcpIPDirectDNSInTunMode(t *testing.T) {
+func TestSetDnsKeepsConfiguredPlainTcpIPDirectDNSInTunMode(t *testing.T) {
 	directDNS := buildTunDNSServer(t, DNSDirectTag, "tcp://8.8.8.8", "tcp://223.5.5.5")
 
 	dnsOptions, ok := directDNS.Options.(*option.RemoteDNSServerOptions)
 	if !ok {
-		t.Fatalf("expected direct DNS to use UDP options in TUN mode, got %T", directDNS.Options)
+		t.Fatalf("expected direct DNS to keep TCP options in TUN mode, got %T", directDNS.Options)
 	}
-	if directDNS.Type != C.DNSTypeUDP {
-		t.Fatalf("expected direct DNS type to be %q in TUN mode, got %q", C.DNSTypeUDP, directDNS.Type)
+	if directDNS.Type != C.DNSTypeTCP {
+		t.Fatalf("expected direct DNS type to be %q in TUN mode, got %q", C.DNSTypeTCP, directDNS.Type)
 	}
 	if dnsOptions.Server != "223.5.5.5" {
 		t.Fatalf("expected direct DNS server to remain 223.5.5.5, got %q", dnsOptions.Server)
@@ -111,19 +111,17 @@ func TestAddForceDirectRoutesOutboundServerDomainsThroughDirectDNS(t *testing.T)
 		t.Fatal(err)
 	}
 
+	matchedServers := []string{}
 	for _, rule := range rules {
 		if !containsString(rule.RawDefaultDNSRule.Domain, "proxy.example.com") {
 			continue
 		}
-		if rule.RouteOptions.Server != DNSLocalTag {
-			t.Fatalf("expected outbound server domain to use %q in TUN mode, got %q", DNSLocalTag, rule.RouteOptions.Server)
-		}
+		matchedServers = append(matchedServers, rule.RouteOptions.Server)
 		if containsString(rule.RawDefaultDNSRule.Domain, "203.0.113.10") {
 			t.Fatal("expected outbound IP literal not to be added as a DNS domain")
 		}
-		return
 	}
-	t.Fatal("expected outbound server domain to be added to force-direct DNS rules")
+	assertDNSRuleServers(t, matchedServers, []string{DNSMultiDirectTag})
 }
 
 func buildDirectDNSServer(t *testing.T, directDNSAddress string) option.DNSServerOptions {

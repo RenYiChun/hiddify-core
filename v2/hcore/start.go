@@ -139,14 +139,15 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		<-time.After(1000 * time.Millisecond)
 	}
 	libbox.SetMemoryLimit(C.IsIos || !in.DisableMemoryLimit)
+	startDynamicDirectBypassIfNeeded(*options)
 	stageStartedAt = time.Now()
 	instance, err := NewService(ctx, *options)
 	LogTiming("StartService NewService took ", time.Since(stageStartedAt), " total ", time.Since(startedAt))
 	if err != nil {
+		stopDynamicDirectBypass(context.Background())
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance
-	startDynamicDirectBypassIfNeeded(*options)
 	if static.debug {
 		dumpPath := fmt.Sprint(sWorkingPath, "/data/goroutine-start.log")
 		go func() {
@@ -173,6 +174,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		}
 		Log(LogLevel_INFO, LogType_CORE, "StartService active URL test queued")
 	}()
+	go refreshEmbeddedRuleSetFilesWithRetry()
 	LogTiming("StartService finished in ", time.Since(startedAt))
 	return response, nil
 }

@@ -77,6 +77,9 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	sTempPath = params.TempDir
 	sUserID = os.Getuid()
 	sGroupID = os.Getgid()
+	if err := ensureEmbeddedRuleSetFiles(); err != nil {
+		Log(LogLevel_WARNING, LogType_CORE, E.Cause(err, "ensure embedded rule sets").Error())
+	}
 
 	var defaultWriter io.Writer
 	if !params.Debug {

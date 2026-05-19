@@ -76,7 +76,6 @@ type RouteOptions struct {
 	DirectRouteConnectionLimit       int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
 	ProxyRouteConnectionLimit        int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
 	EnableDynamicDirectBypass        bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
-	DynamicDirectBypassThreshold     int                   `json:"dynamic-direct-bypass-threshold,omitempty" overridable:"true"`
 	DynamicDirectBypassTTL           DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
 	DynamicDirectBypassMaxRoutes     int                   `json:"dynamic-direct-bypass-max-routes,omitempty" overridable:"true"`
 	DynamicDirectBypassMaxRoutesHost int                   `json:"dynamic-direct-bypass-max-routes-per-host,omitempty" overridable:"true"`
@@ -118,9 +117,8 @@ const DefaultBalancerStrategy = "round-robin"
 const (
 	DefaultDirectRouteConnectionLimit       = 1024
 	DefaultProxyRouteConnectionLimit        = 256
-	DefaultDynamicDirectBypassThreshold     = 64
-	DefaultDynamicDirectBypassTTL           = DurationInSeconds(1800)
-	DefaultDynamicDirectBypassMaxRoutes     = 512
+	DefaultDynamicDirectBypassTTL           = DurationInSeconds(86400)
+	DefaultDynamicDirectBypassMaxRoutes     = 2048
 	DefaultDynamicDirectBypassMaxRoutesHost = 32
 )
 
@@ -160,7 +158,6 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			DirectRouteConnectionLimit:       DefaultDirectRouteConnectionLimit,
 			ProxyRouteConnectionLimit:        DefaultProxyRouteConnectionLimit,
 			EnableDynamicDirectBypass:        true,
-			DynamicDirectBypassThreshold:     DefaultDynamicDirectBypassThreshold,
 			DynamicDirectBypassTTL:           DefaultDynamicDirectBypassTTL,
 			DynamicDirectBypassMaxRoutes:     DefaultDynamicDirectBypassMaxRoutes,
 			DynamicDirectBypassMaxRoutesHost: DefaultDynamicDirectBypassMaxRoutesHost,

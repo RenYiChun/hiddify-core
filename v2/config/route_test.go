@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	dns "github.com/sagernet/sing-dns"
 )
@@ -60,7 +61,7 @@ func TestSetRoutingOptionsKeepsDirectBootstrapResolverOutsideTun(t *testing.T) {
 	}
 }
 
-func TestSetRoutingOptionsUsesLocalDirectDnsRulesInTun(t *testing.T) {
+func TestSetRoutingOptionsUsesConfiguredDirectDnsRulesInTun(t *testing.T) {
 	options := option.Options{
 		DNS: &option.DNSOptions{},
 	}
@@ -83,37 +84,35 @@ func TestSetRoutingOptionsUsesLocalDirectDnsRulesInTun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	foundRegionRule := false
-	foundConnectionTestRule := false
+	regionServers := []string{}
+	geoSiteServers := []string{}
+	connectionTestServers := []string{}
 	for _, rule := range options.DNS.Rules {
 		if len(rule.DefaultOptions.DomainSuffix) > 0 && rule.DefaultOptions.DomainSuffix[0] == ".cn" {
-			foundRegionRule = true
-			if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
-				t.Fatalf("expected TUN region DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
+			regionServers = append(regionServers, rule.DefaultOptions.RouteOptions.Server)
+			if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected TUN region direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 			}
-			if !rule.DefaultOptions.RouteOptions.BypassIfFailed {
-				t.Fatalf("expected TUN region DNS rule to bypass on failure: %+v", rule.DefaultOptions)
+		}
+		if containsString(rule.DefaultOptions.RuleSet, "geosite-cn") {
+			geoSiteServers = append(geoSiteServers, rule.DefaultOptions.RouteOptions.Server)
+			if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected TUN geosite direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 			}
 		}
 		for _, domain := range rule.DefaultOptions.Domain {
 			if domain != "captive.apple.com" {
 				continue
 			}
-			foundConnectionTestRule = true
-			if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
-				t.Fatalf("expected TUN force-direct DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
-			}
-			if !rule.DefaultOptions.RouteOptions.BypassIfFailed {
-				t.Fatalf("expected TUN force-direct DNS rule to bypass on failure: %+v", rule.DefaultOptions)
+			connectionTestServers = append(connectionTestServers, rule.DefaultOptions.RouteOptions.Server)
+			if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected TUN force-direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 			}
 		}
 	}
-	if !foundRegionRule {
-		t.Fatal("expected region direct DNS rule")
-	}
-	if !foundConnectionTestRule {
-		t.Fatal("expected connection test direct DNS rule")
-	}
+	assertDNSRuleServers(t, regionServers, []string{DNSMultiDirectTag})
+	assertDNSRuleServers(t, geoSiteServers, []string{DNSMultiDirectTag})
+	assertDNSRuleServers(t, connectionTestServers, []string{DNSMultiDirectTag})
 }
 
 func TestSetRoutingOptionsKeepsConfiguredDirectDnsRulesOutsideTun(t *testing.T) {
@@ -142,8 +141,8 @@ func TestSetRoutingOptionsKeepsConfiguredDirectDnsRulesOutsideTun(t *testing.T) 
 		if rule.DefaultOptions.RouteOptions.Server != DNSMultiDirectTag {
 			t.Fatalf("expected non-TUN direct DNS rule to use %q, got %q", DNSMultiDirectTag, rule.DefaultOptions.RouteOptions.Server)
 		}
-		if !rule.DefaultOptions.RouteOptions.BypassIfFailed {
-			t.Fatalf("expected non-TUN direct DNS rule to bypass on failure: %+v", rule.DefaultOptions)
+		if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+			t.Fatalf("expected non-TUN direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 		}
 	}
 	if !foundRegionRule {
@@ -184,11 +183,11 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 		foundDNSRule = foundDNSRule || hasWorkSuffix
 		foundDriveDNSRule = foundDriveDNSRule || hasDriveSuffix
 		foundCosDNSRule = foundCosDNSRule || hasCosSuffix
-		if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
-			t.Fatalf("expected TUN work domain DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
+		if rule.DefaultOptions.RouteOptions.Server != DNSMultiDirectTag {
+			t.Fatalf("expected TUN work domain DNS rule to use configured direct DNS, got %q", rule.DefaultOptions.RouteOptions.Server)
 		}
-		if !rule.DefaultOptions.RouteOptions.BypassIfFailed {
-			t.Fatalf("expected TUN work domain DNS rule to bypass on failure: %+v", rule.DefaultOptions)
+		if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+			t.Fatalf("expected explicit direct domain DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 		}
 	}
 	if !foundDNSRule {
@@ -254,8 +253,11 @@ func TestSetRoutingOptionsAddsDefaultDirectRulesOutsideChina(t *testing.T) {
 	for _, rule := range options.DNS.Rules {
 		if containsString(rule.DefaultOptions.DomainSuffix, "work.weixin.qq.com") {
 			foundDNSRule = true
-			if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
-				t.Fatalf("expected TUN default direct DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
+			if rule.DefaultOptions.RouteOptions.Server != DNSMultiDirectTag {
+				t.Fatalf("expected TUN default direct DNS rule to use configured direct DNS, got %q", rule.DefaultOptions.RouteOptions.Server)
+			}
+			if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected TUN default direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 			}
 		}
 	}
@@ -301,6 +303,64 @@ func TestSetRoutingOptionsAvoidsGeoIPDirectRouteInTun(t *testing.T) {
 	}
 }
 
+func TestSetRoutingOptionsUsesLocalCountryRuleSetWhenCached(t *testing.T) {
+	basePath := t.TempDir()
+	directRulesPath := DefaultDirectDomainSuffixRulesPath(basePath)
+	localRuleSetPath := DefaultCountryRuleSetPath(basePath, "geosite-cn")
+	if err := os.MkdirAll(filepath.Dir(localRuleSetPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localRuleSetPath, []byte{1, 2, 3}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	options := option.Options{DNS: &option.DNSOptions{}}
+	hopt := DefaultHiddifyOptions()
+	hopt.Region = "cn"
+	hopt.EnableTun = true
+	hopt.DirectDomainSuffixRulesPath = directRulesPath
+
+	if err := setRoutingOptions(&options, hopt); err != nil {
+		t.Fatal(err)
+	}
+
+	ruleSet, ok := findRuleSet(options.Route.RuleSet, "geosite-cn")
+	if !ok {
+		t.Fatal("expected geosite-cn rule-set")
+	}
+	if ruleSet.Type != C.RuleSetTypeLocal {
+		t.Fatalf("expected geosite-cn to use local rule-set, got %q", ruleSet.Type)
+	}
+	expectedConfigPath := filepath.ToSlash(filepath.Join(RulesRelativeDir, "geosite-cn.srs"))
+	if ruleSet.LocalOptions.Path != expectedConfigPath {
+		t.Fatalf("expected local geosite-cn path %q, got %q", expectedConfigPath, ruleSet.LocalOptions.Path)
+	}
+}
+
+func TestSetRoutingOptionsKeepsRemoteCountryRuleSetWithoutLocalCache(t *testing.T) {
+	basePath := t.TempDir()
+	options := option.Options{DNS: &option.DNSOptions{}}
+	hopt := DefaultHiddifyOptions()
+	hopt.Region = "cn"
+	hopt.EnableTun = true
+	hopt.DirectDomainSuffixRulesPath = DefaultDirectDomainSuffixRulesPath(basePath)
+
+	if err := setRoutingOptions(&options, hopt); err != nil {
+		t.Fatal(err)
+	}
+
+	ruleSet, ok := findRuleSet(options.Route.RuleSet, "geosite-cn")
+	if !ok {
+		t.Fatal("expected geosite-cn rule-set")
+	}
+	if ruleSet.Type != C.RuleSetTypeRemote {
+		t.Fatalf("expected geosite-cn to use remote rule-set without a local cache, got %q", ruleSet.Type)
+	}
+	if ruleSet.RemoteOptions.URL != "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geosite-cn.srs" {
+		t.Fatalf("unexpected remote geosite-cn URL: %q", ruleSet.RemoteOptions.URL)
+	}
+}
+
 func TestLoadDirectDomainSuffixRulesFileCreatesEditableDefaultFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rules", "direct-domain-suffixes.txt")
 
@@ -318,6 +378,29 @@ func TestLoadDirectDomainSuffixRulesFileCreatesEditableDefaultFile(t *testing.T)
 	}
 	if !containsString(ParseDirectDomainSuffixRules(string(content)), "work.weixin.qq.com") {
 		t.Fatalf("expected created file to contain editable defaults, got:\n%s", string(content))
+	}
+}
+
+func TestDefaultDirectDomainSuffixRulesIncludeCloudLoginDependencies(t *testing.T) {
+	suffixes := DefaultDirectDomainSuffixRules()
+
+	for _, expected := range []string{
+		"huaweicloud.com",
+		"myhuaweicloud.com",
+		"huaweicloudapis.com",
+		"huaweicloudwaf.com",
+		"huawei.com",
+		"hicloud.com",
+		"vmall.com",
+		"hc-cdn.com",
+		"hc-cdn.cn",
+		"cdnhwc1.com",
+		"cdnhwc2.com",
+		"globalsign.com",
+	} {
+		if !containsString(suffixes, expected) {
+			t.Fatalf("expected default direct suffix rules to include %q, got %#v", expected, suffixes)
+		}
 	}
 }
 
@@ -384,8 +467,11 @@ func TestSetRoutingOptionsLoadsEditableDirectRulesForEveryRegion(t *testing.T) {
 					continue
 				}
 				foundDNSRule = true
-				if rule.DefaultOptions.RouteOptions.Server != DNSLocalTag {
-					t.Fatalf("expected editable direct DNS rule to use %q, got %q", DNSLocalTag, rule.DefaultOptions.RouteOptions.Server)
+				if rule.DefaultOptions.RouteOptions.Server != DNSMultiDirectTag {
+					t.Fatalf("expected editable direct DNS rule to use configured direct DNS, got %q", rule.DefaultOptions.RouteOptions.Server)
+				}
+				if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+					t.Fatalf("expected editable direct DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
 				}
 			}
 			if !foundDNSRule {
@@ -406,6 +492,44 @@ func TestSetRoutingOptionsLoadsEditableDirectRulesForEveryRegion(t *testing.T) {
 				t.Fatal("expected editable suffix to be injected into route rules")
 			}
 		})
+	}
+}
+
+func TestSetRoutingOptionsEditableDirectRulesDoNotFallbackToRemoteDNS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "direct-domain-suffixes.txt")
+	if err := os.WriteFile(path, []byte("custom.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	options := option.Options{DNS: &option.DNSOptions{}}
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN:                   true,
+			DirectDomainSuffixRulesPath: path,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, rule := range options.DNS.Rules {
+		if !containsString(rule.DefaultOptions.DomainSuffix, "custom.example.com") {
+			continue
+		}
+		found = true
+		if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+			t.Fatalf("expected editable direct domain DNS rule not to fall back to later DNS rules: %+v", rule.DefaultOptions)
+		}
+	}
+	if !found {
+		t.Fatal("expected editable direct domain DNS rule")
 	}
 }
 
@@ -460,6 +584,18 @@ func dnsRulesContainSuffix(rules []option.DNSRule, suffix string) bool {
 	return false
 }
 
+func assertDNSRuleServers(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected DNS rule servers %#v, got %#v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected DNS rule servers %#v, got %#v", want, got)
+		}
+	}
+}
+
 func containsString(values []string, needle string) bool {
 	for _, value := range values {
 		if value == needle {
@@ -467,4 +603,13 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func findRuleSet(ruleSets []option.RuleSet, tag string) (option.RuleSet, bool) {
+	for _, ruleSet := range ruleSets {
+		if ruleSet.Tag == tag {
+			return ruleSet, true
+		}
+	}
+	return option.RuleSet{}, false
 }
