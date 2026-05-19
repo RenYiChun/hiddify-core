@@ -89,3 +89,35 @@ func TestApplyLocalDirectDomainSuffixRulesPathKeepsExplicitPath(t *testing.T) {
 		t.Fatalf("expected explicit rules path to be preserved, got %q", hopts.DirectDomainSuffixRulesPath)
 	}
 }
+
+func TestApplyLocalDynamicDirectBypassRoutesPathUsesWorkingPath(t *testing.T) {
+	previousWorkingPath := sWorkingPath
+	sWorkingPath = t.TempDir()
+	t.Cleanup(func() {
+		sWorkingPath = previousWorkingPath
+	})
+
+	hopts := config.DefaultHiddifyOptions()
+	applyLocalDynamicDirectBypassRoutesPath(hopts)
+
+	expected := filepath.Clean(filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"))
+	if hopts.DynamicDirectBypassRoutesPath != expected {
+		t.Fatalf("expected dynamic direct bypass routes path %q, got %q", expected, hopts.DynamicDirectBypassRoutesPath)
+	}
+}
+
+func TestApplyLocalDynamicDirectBypassRoutesPathKeepsExplicitPath(t *testing.T) {
+	previousWorkingPath := sWorkingPath
+	sWorkingPath = t.TempDir()
+	t.Cleanup(func() {
+		sWorkingPath = previousWorkingPath
+	})
+
+	hopts := config.DefaultHiddifyOptions()
+	hopts.DynamicDirectBypassRoutesPath = filepath.Join(t.TempDir(), "custom-routes.json")
+	applyLocalDynamicDirectBypassRoutesPath(hopts)
+
+	if filepath.Base(hopts.DynamicDirectBypassRoutesPath) != "custom-routes.json" {
+		t.Fatalf("expected explicit dynamic direct bypass routes path to be preserved, got %q", hopts.DynamicDirectBypassRoutesPath)
+	}
+}

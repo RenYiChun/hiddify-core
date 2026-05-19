@@ -5,10 +5,19 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
+	"github.com/hiddify/hiddify-core/v2/config"
 	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+)
+
+var (
+	dynamicDirectBypassRouteReloadDelay = 2 * time.Second
+	dynamicDirectBypassRouteReloadMu    sync.Mutex
+	dynamicDirectBypassRouteReloadTimer *time.Timer
+	dynamicDirectBypassRouteReloadFunc  = reloadDynamicDirectBypassRouteRules
 )
 
 func startDynamicDirectBypassIfNeeded(options option.Options) {
@@ -45,6 +54,7 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 		newSystemDynamicDirectBypassDNSCacheReader(),
 		filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"),
 	)
+	manager.onRoutesChanged = scheduleDynamicDirectBypassRouteReload
 	static.dynamicDirectBypassCancel = cancel
 	static.dynamicDirectBypass = manager
 	stageStartedAt = time.Now()
@@ -91,9 +101,62 @@ func stopActiveDynamicDirectBypass(ctx context.Context) bool {
 		stopped = true
 	}
 	if stopped {
+		cancelDynamicDirectBypassRouteReload()
 		LogTiming("DynamicDirectBypass active stop took ", time.Since(startedAt))
 	}
 	return stopped
+}
+
+func scheduleDynamicDirectBypassRouteReload() {
+	dynamicDirectBypassRouteReloadMu.Lock()
+	defer dynamicDirectBypassRouteReloadMu.Unlock()
+	if dynamicDirectBypassRouteReloadTimer != nil {
+		dynamicDirectBypassRouteReloadTimer.Stop()
+	}
+	dynamicDirectBypassRouteReloadTimer = time.AfterFunc(dynamicDirectBypassRouteReloadDelay, func() {
+		dynamicDirectBypassRouteReloadFunc(dynamicDirectBypassRouteReloadContext())
+	})
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload scheduled")
+}
+
+func dynamicDirectBypassRouteReloadContext() context.Context {
+	if static.BaseContext != nil {
+		return static.BaseContext
+	}
+	return context.Background()
+}
+
+func cancelDynamicDirectBypassRouteReload() {
+	dynamicDirectBypassRouteReloadMu.Lock()
+	defer dynamicDirectBypassRouteReloadMu.Unlock()
+	if dynamicDirectBypassRouteReloadTimer != nil {
+		dynamicDirectBypassRouteReloadTimer.Stop()
+		dynamicDirectBypassRouteReloadTimer = nil
+	}
+}
+
+func reloadDynamicDirectBypassRouteRules(ctx context.Context) {
+	startedAt := time.Now()
+	static.lock.Lock()
+	defer static.lock.Unlock()
+	if static.StartedService == nil || static.previousStartRequest == nil {
+		Log(LogLevel_DEBUG, LogType_CORE, "dynamic direct bypass route-rule reload skipped: service not started")
+		return
+	}
+	options, err := BuildConfig(ctx, static.previousStartRequest)
+	if err != nil {
+		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass route-rule reload build failed: ", err)
+		return
+	}
+	currentBuildConfigPath := filepath.Join(sWorkingPath, "data/current-config.json")
+	if err := config.SaveCurrentConfig(ctx, currentBuildConfigPath, *options); err != nil {
+		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass route-rule reload save config failed: ", err)
+	}
+	if err := static.StartedService.StartOrReloadServiceOptions(*options); err != nil {
+		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass route-rule reload failed: ", err)
+		return
+	}
+	LogTiming("DynamicDirectBypass route-rule reload took ", time.Since(startedAt))
 }
 
 func cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx context.Context) {

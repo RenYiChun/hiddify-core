@@ -76,6 +76,7 @@ type RouteOptions struct {
 	DirectRouteConnectionLimit       int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
 	ProxyRouteConnectionLimit        int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
 	EnableDynamicDirectBypass        bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
+	DynamicDirectBypassRoutesPath    string                `json:"dynamic-direct-bypass-routes-path,omitempty"`
 	DynamicDirectBypassTTL           DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
 	DynamicDirectBypassMaxRoutes     int                   `json:"dynamic-direct-bypass-max-routes,omitempty" overridable:"true"`
 	DynamicDirectBypassMaxRoutesHost int                   `json:"dynamic-direct-bypass-max-routes-per-host,omitempty" overridable:"true"`

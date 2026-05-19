@@ -3,6 +3,8 @@ package hutils
 import (
 	"fmt"
 	"net"
+	"os"
+	"runtime/debug"
 )
 
 func IsPortInUse(port uint16) bool {
@@ -12,4 +14,13 @@ func IsPortInUse(port uint16) bool {
 	}
 	defer listener.Close()
 	return false
+}
+
+func redirectStderr(path string) error {
+	outputFile, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+	return debug.SetCrashOutput(outputFile, debug.CrashOptions{})
 }

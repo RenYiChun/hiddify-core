@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 const (
 	geositeCNRuleSetTag           = "geosite-cn"
+	geoipCNRuleSetTag             = "geoip-cn"
 	countryRuleSetRefreshInterval = 5 * 24 * time.Hour
 	maxRuleSetDownloadSize        = 8 * 1024 * 1024
 	minRuleSetDownloadSize        = 1024
@@ -23,6 +25,7 @@ const (
 
 var (
 	geositeCNRuleSetURL = "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geosite-cn.srs"
+	geoipCNRuleSetURL   = "https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set/country/geoip-cn.srs"
 
 	countryRuleSetRefreshRetryDelays = []time.Duration{
 		30 * time.Second,
@@ -36,34 +39,54 @@ var (
 //go:embed assets/rule-set/country/geosite-cn.srs
 var embeddedGeositeCNRuleSet []byte
 
+//go:embed assets/rule-set/country/geoip-cn.srs
+var embeddedGeoIPCNRuleSet []byte
+
+type embeddedCountryRuleSet struct {
+	tag     string
+	url     string
+	content []byte
+}
+
+func embeddedCountryRuleSets() []embeddedCountryRuleSet {
+	return []embeddedCountryRuleSet{
+		{tag: geositeCNRuleSetTag, url: geositeCNRuleSetURL, content: embeddedGeositeCNRuleSet},
+		{tag: geoipCNRuleSetTag, url: geoipCNRuleSetURL, content: embeddedGeoIPCNRuleSet},
+	}
+}
+
 func ensureEmbeddedRuleSetFiles() error {
 	if sWorkingPath == "" {
 		return nil
 	}
-	return ensureEmbeddedRuleSetFile(
-		config.DefaultCountryRuleSetPath(sWorkingPath, geositeCNRuleSetTag),
-		embeddedGeositeCNRuleSet,
-	)
+	for _, ruleSet := range embeddedCountryRuleSets() {
+		if err := ensureEmbeddedRuleSetFile(
+			config.DefaultCountryRuleSetPath(sWorkingPath, ruleSet.tag),
+			ruleSet.content,
+		); err != nil {
+			return fmt.Errorf("ensure %s rule-set: %w", ruleSet.tag, err)
+		}
+	}
+	return nil
 }
 
 func refreshEmbeddedRuleSetFilesWithRetry() {
 	if sWorkingPath == "" {
 		return
 	}
-	path := config.DefaultCountryRuleSetPath(sWorkingPath, geositeCNRuleSetTag)
-	if !shouldRefreshRuleSetFile(path, embeddedGeositeCNRuleSet, countryRuleSetRefreshInterval) {
+	if !anyEmbeddedRuleSetNeedsRefresh() {
 		return
 	}
 	for attempt, delay := range countryRuleSetRefreshRetryDelays {
 		time.Sleep(delay)
-		if !shouldRefreshRuleSetFile(path, embeddedGeositeCNRuleSet, countryRuleSetRefreshInterval) {
+		if !anyEmbeddedRuleSetNeedsRefresh() {
 			return
 		}
 		if err := refreshEmbeddedRuleSetFiles(); err != nil {
-			Log(LogLevel_DEBUG, LogType_CORE, "refresh geosite-cn rule-set attempt ", attempt+1, " failed: ", err)
+			Log(LogLevel_DEBUG, LogType_CORE, "refresh embedded country rule-sets attempt ", attempt+1, " failed: ", err)
 			continue
 		}
-		Log(LogLevel_INFO, LogType_CORE, "refreshed geosite-cn rule-set cache")
+		Log(LogLevel_INFO, LogType_CORE, "refreshed embedded country rule-set cache")
 		return
 	}
 }
@@ -72,13 +95,30 @@ func refreshEmbeddedRuleSetFiles() error {
 	if sWorkingPath == "" {
 		return nil
 	}
-	path := config.DefaultCountryRuleSetPath(sWorkingPath, geositeCNRuleSetTag)
-	if !shouldRefreshRuleSetFile(path, embeddedGeositeCNRuleSet, countryRuleSetRefreshInterval) {
-		return nil
+	var errs []error
+	for _, ruleSet := range embeddedCountryRuleSets() {
+		path := config.DefaultCountryRuleSetPath(sWorkingPath, ruleSet.tag)
+		if !shouldRefreshRuleSetFile(path, ruleSet.content, countryRuleSetRefreshInterval) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		err := refreshRuleSetFile(ctx, path, ruleSet.url)
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("refresh %s rule-set: %w", ruleSet.tag, err))
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	return refreshRuleSetFile(ctx, path, geositeCNRuleSetURL)
+	return errors.Join(errs...)
+}
+
+func anyEmbeddedRuleSetNeedsRefresh() bool {
+	for _, ruleSet := range embeddedCountryRuleSets() {
+		path := config.DefaultCountryRuleSetPath(sWorkingPath, ruleSet.tag)
+		if shouldRefreshRuleSetFile(path, ruleSet.content, countryRuleSetRefreshInterval) {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureEmbeddedRuleSetFile(path string, content []byte) error {

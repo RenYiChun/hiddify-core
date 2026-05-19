@@ -14,5 +14,6 @@ data
 
 **/*.syso
 node_modules
+build
 *.db
 *.json

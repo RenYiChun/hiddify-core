@@ -224,6 +224,30 @@ func TestSelectDynamicDirectBypassCandidatesDoesNotTreatProxyTagContainingDirect
 	}
 }
 
+func TestSelectDynamicDirectBypassCandidatesIgnoresHiddifyOwnTraffic(t *testing.T) {
+	cfg := dynamicDirectBypassConfig{
+		Enabled:          true,
+		MaxRoutesPerHost: 4,
+	}
+	connections := []dynamicDirectBypassConnection{
+		{
+			Host:         "cp.cloudflare.com",
+			Destination:  netip.MustParseAddr("104.18.32.47"),
+			Outbound:     "direct §hide§",
+			OutboundType: "direct",
+			Chain:        []string{"direct §hide§"},
+			ProcessName:  "Hiddify.exe",
+			ProcessPath:  `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\Hiddify.exe`,
+		},
+	}
+
+	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+
+	if len(candidates) != 0 {
+		t.Fatalf("expected Hiddify's own direct traffic not to seed dynamic bypass routes, got %#v", candidates)
+	}
+}
+
 func TestSelectDynamicDirectBypassCandidatesSelectsRepeatedRemoteHandshakeFailure(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
@@ -350,6 +374,131 @@ func TestDynamicDirectBypassManagerKeepsRemoteFailureRouteOnlyAfterSuccessfulDir
 	cached := readDynamicDirectBypassCache(t, cachePath)
 	if len(cached) != 1 || cached[0].IP != "47.89.238.193" {
 		t.Fatalf("expected successful direct probe route to be cached, got %#v", cached)
+	}
+}
+
+func TestDynamicDirectBypassManagerNotifiesWhenNewRouteCanAffectRoutingRules(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, "")
+	notifications := 0
+	manager.onRoutesChanged = func() {
+		notifications++
+	}
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "smartservice.console.aliyun.com",
+		IPs:       []netip.Addr{netip.MustParseAddr("47.89.238.193")},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(time.Minute))
+
+	if notifications != 1 {
+		t.Fatalf("expected one route-rule reload notification for the new route, got %d", notifications)
+	}
+}
+
+func TestDynamicDirectBypassManagerNotifiesWhenRouteExpires(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, "")
+	manager.routes[netip.MustParseAddr("47.89.238.193")] = dynamicDirectBypassRoute{
+		Host:      "smartservice.console.aliyun.com",
+		IP:        "47.89.238.193",
+		ExpiresAt: now.Add(-time.Minute),
+	}
+	notifications := 0
+	manager.onRoutesChanged = func() {
+		notifications++
+	}
+
+	manager.cleanupExpired(context.Background(), now)
+
+	if notifications != 1 {
+		t.Fatalf("expected one route-rule reload notification for expired route, got %d", notifications)
+	}
+}
+
+func TestScheduleDynamicDirectBypassRouteReloadDebounces(t *testing.T) {
+	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousReload := dynamicDirectBypassRouteReloadFunc
+	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	reloaded := make(chan struct{}, 2)
+	dynamicDirectBypassRouteReloadFunc = func(context.Context) {
+		reloaded <- struct{}{}
+	}
+	t.Cleanup(func() {
+		dynamicDirectBypassRouteReloadMu.Lock()
+		if dynamicDirectBypassRouteReloadTimer != nil {
+			dynamicDirectBypassRouteReloadTimer.Stop()
+			dynamicDirectBypassRouteReloadTimer = nil
+		}
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadFunc = previousReload
+	})
+
+	scheduleDynamicDirectBypassRouteReload()
+	scheduleDynamicDirectBypassRouteReload()
+
+	select {
+	case <-reloaded:
+	case <-time.After(time.Second):
+		t.Fatal("expected debounced dynamic direct bypass route reload")
+	}
+	select {
+	case <-reloaded:
+		t.Fatal("expected repeated schedule calls to debounce into one reload")
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestScheduleDynamicDirectBypassRouteReloadUsesBaseContext(t *testing.T) {
+	type reloadContextTestKey struct{}
+
+	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousReload := dynamicDirectBypassRouteReloadFunc
+	previousBaseContext := static.BaseContext
+	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	key := reloadContextTestKey{}
+	static.BaseContext = context.WithValue(context.Background(), key, "base-context")
+	reloaded := make(chan any, 1)
+	dynamicDirectBypassRouteReloadFunc = func(ctx context.Context) {
+		reloaded <- ctx.Value(key)
+	}
+	t.Cleanup(func() {
+		dynamicDirectBypassRouteReloadMu.Lock()
+		if dynamicDirectBypassRouteReloadTimer != nil {
+			dynamicDirectBypassRouteReloadTimer.Stop()
+			dynamicDirectBypassRouteReloadTimer = nil
+		}
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadFunc = previousReload
+		static.BaseContext = previousBaseContext
+	})
+
+	scheduleDynamicDirectBypassRouteReload()
+
+	select {
+	case value := <-reloaded:
+		if value != "base-context" {
+			t.Fatalf("expected route reload to use static base context, got %#v", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected dynamic direct bypass route reload")
 	}
 }
 
@@ -553,6 +702,46 @@ func TestDynamicDirectBypassManagerDeletesExpiredCachedRoutesOnLoad(t *testing.T
 	}
 	if cached := readDynamicDirectBypassCache(t, cachePath); len(cached) != 0 {
 		t.Fatalf("expected expired cache to be removed, got %#v", cached)
+	}
+}
+
+func TestDynamicDirectBypassManagerDropsCachedHiddifyOwnRoutesOnLoad(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	writeDynamicDirectBypassCache(t, cachePath, []dynamicDirectBypassRoute{
+		{
+			Host:        "cp.cloudflare.com",
+			IP:          "104.18.32.47",
+			ProcessName: "Hiddify.exe",
+			ProcessPath: `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\Hiddify.exe`,
+			LastSeen:    now,
+			ExpiresAt:   now.Add(30 * time.Minute),
+		},
+		{
+			Host:      "smartservice.console.aliyun.com",
+			IP:        "47.89.238.193",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+	})
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, cachePath)
+
+	if err := manager.loadCacheAndApply(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != netip.MustParseAddr("47.89.238.193") {
+		t.Fatalf("expected only non-Hiddify cached routes to be restored, got %#v", routeManager.added)
+	}
+	cached := readDynamicDirectBypassCache(t, cachePath)
+	if len(cached) != 1 || cached[0].IP != "47.89.238.193" {
+		t.Fatalf("expected Hiddify-owned route to be pruned from cache, got %#v", cached)
 	}
 }
 

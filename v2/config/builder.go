@@ -3,6 +3,7 @@ package config
 import (
 	context "context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -1012,6 +1013,8 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		)
 	}
 
+	routeRules = appendDynamicDirectBypassRouteRules(routeRules, hopt)
+
 	// for _, rule := range opt.Rules {
 	// 	routeRule := rule.MakeRule()
 	// 	switch rule.Outbound {
@@ -1432,6 +1435,115 @@ func localCountryRuleSetPaths(tag string, hopt *HiddifyOptions) (string, string)
 func localRuleSetFileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+type dynamicDirectBypassRouteCacheEntry struct {
+	Host        string    `json:"host"`
+	IP          string    `json:"ip"`
+	ProcessName string    `json:"process_name,omitempty"`
+	ProcessPath string    `json:"process_path,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+func appendDynamicDirectBypassRouteRules(routeRules []option.Rule, hopt *HiddifyOptions) []option.Rule {
+	cidrs := loadDynamicDirectBypassRouteCIDRs(hopt, time.Now())
+	if len(cidrs) == 0 {
+		return routeRules
+	}
+	return append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				IPCIDR: cidrs,
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{
+					Outbound: OutboundDirectTag,
+				},
+			},
+		},
+	})
+}
+
+func loadDynamicDirectBypassRouteCIDRs(hopt *HiddifyOptions, now time.Time) []string {
+	if hopt == nil || !hopt.EnableDynamicDirectBypass || hopt.DynamicDirectBypassRoutesPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(hopt.DynamicDirectBypassRoutesPath)
+	if err != nil {
+		return nil
+	}
+	var entries []dynamicDirectBypassRouteCacheEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil
+	}
+	maxRoutes := hopt.DynamicDirectBypassMaxRoutes
+	if maxRoutes <= 0 {
+		maxRoutes = DefaultDynamicDirectBypassMaxRoutes
+	}
+	maxRoutesPerHost := hopt.DynamicDirectBypassMaxRoutesHost
+	if maxRoutesPerHost <= 0 {
+		maxRoutesPerHost = DefaultDynamicDirectBypassMaxRoutesHost
+	}
+	hostCounts := map[string]int{}
+	seen := map[string]struct{}{}
+	cidrs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if len(cidrs) >= maxRoutes {
+			break
+		}
+		if isDynamicDirectBypassConfigSelfRoute(entry) {
+			continue
+		}
+		if !entry.ExpiresAt.IsZero() && !now.Before(entry.ExpiresAt) {
+			continue
+		}
+		addr, err := netip.ParseAddr(entry.IP)
+		if err != nil || !isDynamicDirectBypassConfigRouteIP(addr) {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSpace(entry.Host))
+		if host != "" {
+			if hostCounts[host] >= maxRoutesPerHost {
+				continue
+			}
+			hostCounts[host]++
+		}
+		cidr := addr.String() + "/32"
+		if _, exists := seen[cidr]; exists {
+			continue
+		}
+		seen[cidr] = struct{}{}
+		cidrs = append(cidrs, cidr)
+	}
+	sort.Strings(cidrs)
+	return cidrs
+}
+
+func isDynamicDirectBypassConfigRouteIP(addr netip.Addr) bool {
+	return addr.IsValid() &&
+		addr.Is4() &&
+		addr.IsGlobalUnicast() &&
+		!addr.IsPrivate() &&
+		!addr.IsLoopback() &&
+		!addr.IsLinkLocalUnicast() &&
+		!addr.IsMulticast() &&
+		!addr.IsUnspecified()
+}
+
+func isDynamicDirectBypassConfigSelfRoute(entry dynamicDirectBypassRouteCacheEntry) bool {
+	processName := strings.ToLower(strings.TrimSpace(entry.ProcessName))
+	if processName == "" {
+		processPath := strings.TrimSpace(entry.ProcessPath)
+		index := strings.LastIndexAny(processPath, `\/`)
+		if index >= 0 && index+1 < len(processPath) {
+			processName = strings.ToLower(processPath[index+1:])
+		} else {
+			processName = strings.ToLower(processPath)
+		}
+	}
+	return processName == "hiddify.exe" || processName == "hiddify"
 }
 
 func patchHiddifyWarpFromConfig(out *option.Outbound, opt HiddifyOptions) *option.Outbound {

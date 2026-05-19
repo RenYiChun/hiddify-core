@@ -205,7 +205,7 @@ func windowsAddHostRoutesScript(route *windowsDefaultRoute) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'Continue'
 $raw = [Console]::In.ReadToEnd()
 $ips = @()
-if (-not [string]::IsNullOrWhiteSpace($raw)) { $ips = @($raw | ConvertFrom-Json) }
+if (-not [string]::IsNullOrWhiteSpace($raw)) { $decoded = $raw | ConvertFrom-Json; $ips = @($decoded) }
 $failures = @()
 $prefixes = @{}
 foreach ($ip in $ips) { $prefixes["$ip/32"] = $true }
@@ -232,7 +232,7 @@ func windowsDeleteHostRoutesScript() string {
 	return `$ErrorActionPreference = 'Continue'
 $raw = [Console]::In.ReadToEnd()
 $ips = @()
-if (-not [string]::IsNullOrWhiteSpace($raw)) { $ips = @($raw | ConvertFrom-Json) }
+if (-not [string]::IsNullOrWhiteSpace($raw)) { $decoded = $raw | ConvertFrom-Json; $ips = @($decoded) }
 $failures = @()
 $prefixes = @{}
 foreach ($ip in $ips) { $prefixes["$ip/32"] = $true }

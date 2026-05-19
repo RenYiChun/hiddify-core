@@ -13,7 +13,7 @@ import (
 	"github.com/hiddify/hiddify-core/v2/config"
 )
 
-func TestEnsureEmbeddedRuleSetFilesWritesGeositeCN(t *testing.T) {
+func TestEnsureEmbeddedRuleSetFilesWritesCNRuleSets(t *testing.T) {
 	previousWorkingPath := sWorkingPath
 	sWorkingPath = t.TempDir()
 	defer func() {
@@ -24,13 +24,15 @@ func TestEnsureEmbeddedRuleSetFilesWritesGeositeCN(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path := config.DefaultCountryRuleSetPath(sWorkingPath, "geosite-cn")
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() == 0 {
-		t.Fatal("expected embedded geosite-cn rule-set to be written")
+	for _, tag := range []string{"geosite-cn", "geoip-cn"} {
+		path := config.DefaultCountryRuleSetPath(sWorkingPath, tag)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("expected embedded %s rule-set to be written", tag)
+		}
 	}
 }
 
@@ -154,14 +156,17 @@ func TestRefreshEmbeddedRuleSetFilesReturnsAfterSuccessfulDownload(t *testing.T)
 		sWorkingPath = previousWorkingPath
 	}()
 	previousURL := geositeCNRuleSetURL
+	previousGeoIPURL := geoipCNRuleSetURL
 	content := bytes.Repeat([]byte{5, 6, 7, 8}, 512)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(content)
 	}))
 	defer server.Close()
 	geositeCNRuleSetURL = server.URL
+	geoipCNRuleSetURL = server.URL
 	defer func() {
 		geositeCNRuleSetURL = previousURL
+		geoipCNRuleSetURL = previousGeoIPURL
 	}()
 
 	if err := ensureEmbeddedRuleSetFiles(); err != nil {
@@ -171,11 +176,13 @@ func TestRefreshEmbeddedRuleSetFilesReturnsAfterSuccessfulDownload(t *testing.T)
 		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(config.DefaultCountryRuleSetPath(sWorkingPath, geositeCNRuleSetTag))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Fatal("expected refreshed rule-set content")
+	for _, tag := range []string{geositeCNRuleSetTag, geoipCNRuleSetTag} {
+		got, err := os.ReadFile(config.DefaultCountryRuleSetPath(sWorkingPath, tag))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, content) {
+			t.Fatalf("expected refreshed %s rule-set content", tag)
+		}
 	}
 }

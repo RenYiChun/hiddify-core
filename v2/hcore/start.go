@@ -148,6 +148,9 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		<-time.After(1000 * time.Millisecond)
 	}
 	libbox.SetMemoryLimit(C.IsIos || !in.DisableMemoryLimit)
+	stageStartedAt = time.Now()
+	cleanupStaleSystemProxyForTunIfNeeded(*options)
+	LogTiming("StartService stale system proxy cleanup took ", time.Since(stageStartedAt), " total ", time.Since(startedAt))
 	startDynamicDirectBypassIfNeeded(*options)
 	stageStartedAt = time.Now()
 	instance, err := NewService(ctx, *options)

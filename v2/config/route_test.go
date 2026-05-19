@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -35,6 +36,52 @@ func TestSetRoutingOptionsUsesLocalBootstrapResolverForTun(t *testing.T) {
 	if options.Route.DefaultDomainResolver.Server != DNSLocalTag {
 		t.Fatalf("expected TUN bootstrap resolver to use %q, got %q", DNSLocalTag, options.Route.DefaultDomainResolver.Server)
 	}
+}
+
+func TestSetRoutingOptionsAddsDynamicDirectBypassIPRules(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+	past := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
+	if err := os.WriteFile(cachePath, []byte(`[
+		{"host":"smartservice.console.aliyun.com","ip":"47.89.238.193","expires_at":"`+future+`"},
+		{"host":"smartservice.console.aliyun.com","ip":"47.88.73.20","expires_at":"`+future+`"},
+		{"host":"cp.cloudflare.com","ip":"104.18.32.47","process_name":"Hiddify.exe","process_path":"D:\\github.com\\hiddify-app\\build\\windows\\x64\\runner\\Debug\\Hiddify.exe","expires_at":"`+future+`"},
+		{"host":"expired.example.com","ip":"47.88.73.19","expires_at":"`+past+`"},
+		{"host":"private.example.com","ip":"192.168.1.20","expires_at":"`+future+`"}
+	]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN:                        true,
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassRoutesPath:    cachePath,
+			DynamicDirectBypassMaxRoutes:     128,
+			DynamicDirectBypassMaxRoutesHost: 32,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := findDynamicDirectBypassRule(options.Route.Rules)
+	if rule == nil {
+		t.Fatal("expected dynamic direct bypass route rule to be generated")
+	}
+	if rule.RouteOptions.Outbound != OutboundDirectTag {
+		t.Fatalf("expected dynamic direct bypass rule to use %q, got %q", OutboundDirectTag, rule.RouteOptions.Outbound)
+	}
+	assertStringSet(t, rule.IPCIDR, []string{"47.89.238.193/32", "47.88.73.20/32"})
 }
 
 func TestSetRoutingOptionsKeepsDirectBootstrapResolverOutsideTun(t *testing.T) {
@@ -603,6 +650,31 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func findDynamicDirectBypassRule(rules []option.Rule) *option.DefaultRule {
+	for _, rule := range rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.RouteOptions.Outbound != OutboundDirectTag {
+			continue
+		}
+		if containsString(defaultRule.IPCIDR, "47.89.238.193/32") {
+			return &defaultRule
+		}
+	}
+	return nil
+}
+
+func assertStringSet(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected values %#v, got %#v", want, got)
+	}
+	for _, item := range want {
+		if !containsString(got, item) {
+			t.Fatalf("expected values %#v, got %#v", want, got)
+		}
+	}
 }
 
 func findRuleSet(ruleSets []option.RuleSet, tag string) (option.RuleSet, bool) {

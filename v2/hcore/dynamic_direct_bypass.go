@@ -116,12 +116,13 @@ type dynamicDirectBypassDirectProbe interface {
 }
 
 type dynamicDirectBypassManager struct {
-	config       dynamicDirectBypassConfig
-	routeManager dynamicDirectBypassRouteManager
-	resolver     dynamicDirectBypassResolver
-	dnsCache     dynamicDirectBypassDNSCacheReader
-	directProbe  dynamicDirectBypassDirectProbe
-	cachePath    string
+	config          dynamicDirectBypassConfig
+	routeManager    dynamicDirectBypassRouteManager
+	resolver        dynamicDirectBypassResolver
+	dnsCache        dynamicDirectBypassDNSCacheReader
+	directProbe     dynamicDirectBypassDirectProbe
+	onRoutesChanged func()
+	cachePath       string
 
 	initialRestoreOnce sync.Once
 	access             sync.Mutex
@@ -202,6 +203,10 @@ func selectDynamicDirectBypassCandidates(
 		if !isDirect && !isRemoteFailure {
 			continue
 		}
+		process := dynamicDirectBypassProcessFromConnection(connection)
+		if isDynamicDirectBypassSelfProcess(process) {
+			continue
+		}
 		host := normalizeDynamicDirectBypassHost(connection.Host)
 		routeableDestination := isDynamicDirectBypassRouteIP(connection.Destination, protected)
 		if connection.Destination.IsValid() && !routeableDestination {
@@ -227,7 +232,7 @@ func selectDynamicDirectBypassCandidates(
 		} else {
 			state.directCount++
 		}
-		state.process = mergeDynamicDirectBypassProcess(state.process, dynamicDirectBypassProcessFromConnection(connection))
+		state.process = mergeDynamicDirectBypassProcess(state.process, process)
 		if routeableDestination {
 			state.ips[connection.Destination] = struct{}{}
 		}
@@ -278,12 +283,16 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 	if m == nil || m.routeManager == nil {
 		return
 	}
-	m.access.Lock()
-	defer m.access.Unlock()
 	changed := false
+	routeRulesChanged := false
+	m.access.Lock()
 	defer func() {
 		if changed {
 			m.saveCacheLocked()
+		}
+		m.access.Unlock()
+		if routeRulesChanged {
+			m.notifyRoutesChanged()
 		}
 	}()
 	for _, candidate := range candidates {
@@ -323,12 +332,19 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 			updateDynamicDirectBypassRouteProcess(&route, candidate.Process)
 			m.routes[ip] = route
 			changed = true
+			routeRulesChanged = true
 			if candidate.Reason == "remote-failure" {
 				Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass remote fallback direct route added: ", candidate.Host, " -> ", ip)
 			} else {
 				Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route added: ", candidate.Host, " -> ", ip)
 			}
 		}
+	}
+}
+
+func (m *dynamicDirectBypassManager) notifyRoutesChanged() {
+	if m != nil && m.onRoutesChanged != nil {
+		m.onRoutesChanged()
 	}
 }
 
@@ -361,8 +377,16 @@ func (m *dynamicDirectBypassManager) cleanupExpired(ctx context.Context, now tim
 		return
 	}
 	m.access.Lock()
-	defer m.access.Unlock()
 	changed := false
+	defer func() {
+		if changed {
+			m.saveCacheLocked()
+		}
+		m.access.Unlock()
+		if changed {
+			m.notifyRoutesChanged()
+		}
+	}()
 	for ip, route := range m.routes {
 		if now.Before(route.ExpiresAt) {
 			continue
@@ -373,9 +397,6 @@ func (m *dynamicDirectBypassManager) cleanupExpired(ctx context.Context, now tim
 		delete(m.routes, ip)
 		changed = true
 		Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route expired: ", route.Host, " -> ", ip)
-	}
-	if changed {
-		m.saveCacheLocked()
 	}
 }
 
@@ -523,6 +544,10 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 	toDelete := make([]netip.Addr, 0)
 	hostCounts := map[string]int{}
 	for _, route := range cached {
+		if isDynamicDirectBypassSelfRoute(route) {
+			changed = true
+			continue
+		}
 		ip, err := netip.ParseAddr(route.IP)
 		if err != nil || !isDynamicDirectBypassRouteIP(ip, m.config.ProtectedIPs) {
 			changed = true
@@ -867,6 +892,21 @@ func updateDynamicDirectBypassRouteProcess(route *dynamicDirectBypassRoute, proc
 	if len(process.PackageNames) > 0 {
 		route.PackageNames = append([]string(nil), process.PackageNames...)
 	}
+}
+
+func isDynamicDirectBypassSelfRoute(route dynamicDirectBypassRoute) bool {
+	return isDynamicDirectBypassSelfProcess(dynamicDirectBypassProcess{
+		ProcessName: route.ProcessName,
+		ProcessPath: route.ProcessPath,
+	})
+}
+
+func isDynamicDirectBypassSelfProcess(process dynamicDirectBypassProcess) bool {
+	processName := strings.ToLower(strings.TrimSpace(process.ProcessName))
+	if processName == "" {
+		processName = strings.ToLower(processNameFromPath(process.ProcessPath))
+	}
+	return processName == "hiddify.exe" || processName == "hiddify"
 }
 
 func processNameFromTracker(tracker *trafficontrol.TrackerMetadata) string {
