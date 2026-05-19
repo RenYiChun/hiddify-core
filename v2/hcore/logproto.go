@@ -49,7 +49,7 @@ func Log(level LogLevel, typ LogType, message ...any) {
 }
 
 func LogTiming(message ...any) {
-	fmt.Println(append([]any{"H CORE TIMING"}, message...)...)
+	Log(LogLevel_INFO, LogType_CORE, "TIMING ", fmt.Sprint(message...))
 }
 
 func (s *CoreService) LogListener(req *LogRequest, stream grpc.ServerStreamingServer[LogMessage]) error {

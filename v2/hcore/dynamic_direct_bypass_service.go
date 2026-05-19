@@ -12,16 +12,27 @@ import (
 )
 
 func startDynamicDirectBypassIfNeeded(options option.Options) {
-	stopDynamicDirectBypass(context.Background())
+	startedAt := time.Now()
+	stopActiveDynamicDirectBypass(context.Background())
 	if runtime.GOOS != "windows" || !hasTunInbound(options) {
+		stageStartedAt := time.Now()
 		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
+		LogTiming("DynamicDirectBypass startup cleanup without TUN took ", time.Since(stageStartedAt),
+			" total ", time.Since(startedAt))
 		return
 	}
 	config := dynamicDirectBypassConfigFromOptions(options)
 	if !config.Enabled {
+		stageStartedAt := time.Now()
+		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
+		LogTiming("DynamicDirectBypass disabled cleanup took ", time.Since(stageStartedAt),
+			" total ", time.Since(startedAt))
 		return
 	}
+	stageStartedAt := time.Now()
 	routeManager, err := newSystemDynamicDirectBypassRouteManager()
+	LogTiming("DynamicDirectBypass route manager init took ", time.Since(stageStartedAt),
+		" total ", time.Since(startedAt))
 	if err != nil {
 		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass disabled: ", err)
 		return
@@ -36,44 +47,74 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 	)
 	static.dynamicDirectBypassCancel = cancel
 	static.dynamicDirectBypass = manager
+	stageStartedAt = time.Now()
 	manager.restoreInitial(ctx, time.Now())
+	LogTiming("DynamicDirectBypass restore initial took ", time.Since(stageStartedAt),
+		" total ", time.Since(startedAt))
 	go manager.run(ctx, func() []dynamicDirectBypassConnection {
 		trafficManager := static.TrafficManager()
 		if trafficManager == nil {
 			return nil
 		}
-		return dynamicDirectBypassConnectionsFromTrackers(trafficManager.Connections())
+		trackers := trafficManager.Connections()
+		trackers = append(trackers, trafficManager.ClosedConnections()...)
+		return dynamicDirectBypassConnectionsFromTrackers(trackers)
 	})
 	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass started: mode=all-direct",
 		" ttl=", config.RouteTTL, " maxRoutes=", config.MaxRoutes, " maxRoutesPerHost=", config.MaxRoutesPerHost)
+	LogTiming("DynamicDirectBypass startup finished in ", time.Since(startedAt))
 }
 
 func stopDynamicDirectBypass(ctx context.Context) {
+	startedAt := time.Now()
+	if stopActiveDynamicDirectBypass(ctx) {
+		LogTiming("DynamicDirectBypass stop finished in ", time.Since(startedAt), " mode=active")
+		return
+	}
+	stageStartedAt := time.Now()
+	cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx)
+	LogTiming("DynamicDirectBypass stop cached cleanup took ", time.Since(stageStartedAt),
+		" total ", time.Since(startedAt))
+}
+
+func stopActiveDynamicDirectBypass(ctx context.Context) bool {
+	startedAt := time.Now()
+	stopped := false
 	if static.dynamicDirectBypassCancel != nil {
 		static.dynamicDirectBypassCancel()
 		static.dynamicDirectBypassCancel = nil
+		stopped = true
 	}
 	if static.dynamicDirectBypass != nil {
 		static.dynamicDirectBypass.close(ctx)
 		static.dynamicDirectBypass = nil
+		stopped = true
 	}
-	cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx)
+	if stopped {
+		LogTiming("DynamicDirectBypass active stop took ", time.Since(startedAt))
+	}
+	return stopped
 }
 
 func cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx context.Context) {
 	if runtime.GOOS != "windows" {
 		return
 	}
+	startedAt := time.Now()
 	routeManager, err := newSystemDynamicDirectBypassRouteManager()
+	LogTiming("DynamicDirectBypass cached cleanup route manager init took ", time.Since(startedAt))
 	if err != nil {
 		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass cached route cleanup disabled: ", err)
 		return
 	}
+	stageStartedAt := time.Now()
 	cleanupDynamicDirectBypassCachedSystemRoutes(
 		ctx,
 		routeManager,
 		filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"),
 	)
+	LogTiming("DynamicDirectBypass cached cleanup routes took ", time.Since(stageStartedAt),
+		" total ", time.Since(startedAt))
 }
 
 func hasTunInbound(options option.Options) bool {

@@ -2,6 +2,7 @@ package hcore
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,11 @@ const (
 	customDynamicDirectBypassMaxRoutesKey     = "hiddify-dynamic-direct-bypass-max-routes"
 	customDynamicDirectBypassMaxRoutesHostKey = "hiddify-dynamic-direct-bypass-max-routes-per-host"
 	customDynamicDirectBypassEagerSuffixesKey = "hiddify-dynamic-direct-bypass-eager-domain-suffixes"
+
+	dynamicDirectBypassRemoteFailureThreshold    = 2
+	dynamicDirectBypassRemoteFailureMaxDownload  = 64
+	dynamicDirectBypassRemoteFailureMaxDuration  = 30 * time.Second
+	dynamicDirectBypassRemoteFailureProbeTimeout = 3 * time.Second
 )
 
 type dynamicDirectBypassConfig struct {
@@ -39,22 +46,31 @@ type dynamicDirectBypassConfig struct {
 }
 
 type dynamicDirectBypassConnection struct {
-	Host         string
-	Destination  netip.Addr
-	Outbound     string
-	OutboundType string
-	Chain        []string
-	ProcessName  string
-	ProcessPath  string
-	ProcessID    uint32
-	UserName     string
-	PackageNames []string
+	ID              string
+	Host            string
+	Destination     netip.Addr
+	DestinationPort uint16
+	Network         string
+	Outbound        string
+	OutboundType    string
+	Chain           []string
+	Upload          int64
+	Download        int64
+	CreatedAt       time.Time
+	ClosedAt        time.Time
+	ProcessName     string
+	ProcessPath     string
+	ProcessID       uint32
+	UserName        string
+	PackageNames    []string
 }
 
 type dynamicDirectBypassCandidate struct {
-	Host    string
-	IPs     []netip.Addr
-	Process dynamicDirectBypassProcess
+	Host      string
+	IPs       []netip.Addr
+	Process   dynamicDirectBypassProcess
+	Reason    string
+	ProbePort uint16
 }
 
 type dynamicDirectBypassProcess struct {
@@ -82,6 +98,11 @@ type dynamicDirectBypassRouteManager interface {
 	DeleteHostRoute(ctx context.Context, addr netip.Addr) error
 }
 
+type dynamicDirectBypassBatchRouteManager interface {
+	AddHostRoutes(ctx context.Context, addrs []netip.Addr) map[netip.Addr]error
+	DeleteHostRoutes(ctx context.Context, addrs []netip.Addr) map[netip.Addr]error
+}
+
 type dynamicDirectBypassResolver interface {
 	LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error)
 }
@@ -90,11 +111,16 @@ type dynamicDirectBypassDNSCacheReader interface {
 	LookupCachedHostIPs(ctx context.Context, suffixes []string) ([]dynamicDirectBypassCandidate, error)
 }
 
+type dynamicDirectBypassDirectProbe interface {
+	ProbeDirect(ctx context.Context, host string, ip netip.Addr, port uint16) error
+}
+
 type dynamicDirectBypassManager struct {
 	config       dynamicDirectBypassConfig
 	routeManager dynamicDirectBypassRouteManager
 	resolver     dynamicDirectBypassResolver
 	dnsCache     dynamicDirectBypassDNSCacheReader
+	directProbe  dynamicDirectBypassDirectProbe
 	cachePath    string
 
 	initialRestoreOnce sync.Once
@@ -108,8 +134,8 @@ func defaultDynamicDirectBypassConfig() dynamicDirectBypassConfig {
 		SampleInterval:   time.Second,
 		DNSCacheInterval: 5 * time.Second,
 		RouteTTL:         24 * time.Hour,
-		MaxRoutes:        2048,
-		MaxRoutesPerHost: 32,
+		MaxRoutes:        256,
+		MaxRoutesPerHost: 8,
 	}
 }
 
@@ -126,6 +152,7 @@ func newDynamicDirectBypassManager(
 		routeManager: routeManager,
 		resolver:     resolver,
 		dnsCache:     dnsCache,
+		directProbe:  defaultDynamicDirectBypassDirectProbe{},
 		cachePath:    cachePath,
 		routes:       map[netip.Addr]dynamicDirectBypassRoute{},
 	}
@@ -162,13 +189,17 @@ func selectDynamicDirectBypassCandidates(
 		return nil
 	}
 	type hostState struct {
-		count   int
-		ips     map[netip.Addr]struct{}
-		process dynamicDirectBypassProcess
+		directCount        int
+		remoteFailureCount int
+		remoteFailurePort  uint16
+		ips                map[netip.Addr]struct{}
+		process            dynamicDirectBypassProcess
 	}
 	hosts := map[string]*hostState{}
 	for _, connection := range connections {
-		if !isDynamicDirectBypassDirectConnection(connection) {
+		isDirect := isDynamicDirectBypassDirectConnection(connection)
+		isRemoteFailure := !isDirect && isDynamicDirectBypassRemoteFailureConnection(connection)
+		if !isDirect && !isRemoteFailure {
 			continue
 		}
 		host := normalizeDynamicDirectBypassHost(connection.Host)
@@ -187,7 +218,15 @@ func selectDynamicDirectBypassCandidates(
 			state = &hostState{ips: map[netip.Addr]struct{}{}}
 			hosts[host] = state
 		}
-		state.count++
+		if isRemoteFailure {
+			state.remoteFailureCount++
+			if state.remoteFailurePort == 0 ||
+				state.remoteFailurePort == 80 && connection.DestinationPort == 443 {
+				state.remoteFailurePort = connection.DestinationPort
+			}
+		} else {
+			state.directCount++
+		}
 		state.process = mergeDynamicDirectBypassProcess(state.process, dynamicDirectBypassProcessFromConnection(connection))
 		if routeableDestination {
 			state.ips[connection.Destination] = struct{}{}
@@ -195,7 +234,18 @@ func selectDynamicDirectBypassCandidates(
 	}
 	candidates := make([]dynamicDirectBypassCandidate, 0, len(hosts))
 	for host, state := range hosts {
-		if state.count < 1 {
+		reason := "direct"
+		if state.directCount < 1 {
+			if state.remoteFailureCount < dynamicDirectBypassRemoteFailureThreshold &&
+				!matchesDynamicDirectBypassSuffix(host, config.EagerSuffixes) {
+				continue
+			}
+			reason = "remote-failure"
+			if state.remoteFailurePort == 0 {
+				state.remoteFailurePort = 443
+			}
+		}
+		if state.directCount < 1 && state.remoteFailureCount < 1 {
 			continue
 		}
 		ips := make([]netip.Addr, 0, len(state.ips))
@@ -206,7 +256,13 @@ func selectDynamicDirectBypassCandidates(
 		if len(ips) > config.MaxRoutesPerHost {
 			ips = ips[:config.MaxRoutesPerHost]
 		}
-		candidates = append(candidates, dynamicDirectBypassCandidate{Host: host, IPs: ips, Process: state.process})
+		candidates = append(candidates, dynamicDirectBypassCandidate{
+			Host:      host,
+			IPs:       ips,
+			Process:   state.process,
+			Reason:    reason,
+			ProbePort: state.remoteFailurePort,
+		})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].Host < candidates[j].Host
@@ -248,6 +304,15 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 				Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass add route failed: ", ip, " ", err)
 				continue
 			}
+			if candidate.Reason == "remote-failure" {
+				if err := m.probeRemoteFailureDirectRoute(ctx, candidate, ip); err != nil {
+					if deleteErr := m.routeManager.DeleteHostRoute(ctx, ip); deleteErr != nil {
+						Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete failed remote fallback route failed: ", ip, " ", deleteErr)
+					}
+					Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass remote fallback direct probe failed: ", candidate.Host, " -> ", ip, " ", err)
+					continue
+				}
+			}
 			m.routes[ip] = dynamicDirectBypassRoute{
 				Host:      candidate.Host,
 				IP:        ip.String(),
@@ -258,9 +323,37 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 			updateDynamicDirectBypassRouteProcess(&route, candidate.Process)
 			m.routes[ip] = route
 			changed = true
-			Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route added: ", candidate.Host, " -> ", ip)
+			if candidate.Reason == "remote-failure" {
+				Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass remote fallback direct route added: ", candidate.Host, " -> ", ip)
+			} else {
+				Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route added: ", candidate.Host, " -> ", ip)
+			}
 		}
 	}
+}
+
+func (m *dynamicDirectBypassManager) probeRemoteFailureDirectRoute(
+	ctx context.Context,
+	candidate dynamicDirectBypassCandidate,
+	ip netip.Addr,
+) error {
+	probe := m.directProbe
+	if probe == nil {
+		probe = defaultDynamicDirectBypassDirectProbe{}
+	}
+	port := candidate.ProbePort
+	if port == 0 {
+		port = 443
+	}
+	startedAt := time.Now()
+	if err := probe.ProbeDirect(ctx, candidate.Host, ip, port); err != nil {
+		LogTiming("DynamicDirectBypass remote fallback direct probe failed after ", time.Since(startedAt),
+			" host=", candidate.Host, " ip=", ip, " port=", port)
+		return err
+	}
+	LogTiming("DynamicDirectBypass remote fallback direct probe succeeded in ", time.Since(startedAt),
+		" host=", candidate.Host, " ip=", ip, " port=", port)
+	return nil
 }
 
 func (m *dynamicDirectBypassManager) cleanupExpired(ctx context.Context, now time.Time) {
@@ -290,11 +383,24 @@ func (m *dynamicDirectBypassManager) close(ctx context.Context) {
 	if m == nil || m.routeManager == nil {
 		return
 	}
+	startedAt := time.Now()
 	m.access.Lock()
 	defer m.access.Unlock()
+	stageStartedAt := time.Now()
 	m.saveCacheLocked()
+	LogTiming("DynamicDirectBypass close save cache took ", time.Since(stageStartedAt),
+		" routes=", len(m.routes), " total ", time.Since(startedAt))
+	ips := make([]netip.Addr, 0, len(m.routes))
 	for ip := range m.routes {
-		if err := m.routeManager.DeleteHostRoute(ctx, ip); err != nil {
+		ips = append(ips, ip)
+	}
+	sortAddrSlice(ips)
+	stageStartedAt = time.Now()
+	failures := deleteDynamicDirectBypassHostRoutes(ctx, m.routeManager, ips)
+	LogTiming("DynamicDirectBypass close delete routes took ", time.Since(stageStartedAt),
+		" routes=", len(ips), " failures=", len(failures), " total ", time.Since(startedAt))
+	for _, ip := range ips {
+		if err := failures[ip]; err != nil {
 			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete route failed: ", ip, " ", err)
 		}
 		delete(m.routes, ip)
@@ -394,6 +500,7 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 	if m == nil || m.cachePath == "" || m.routeManager == nil {
 		return nil
 	}
+	startedAt := time.Now()
 	data, err := os.ReadFile(m.cachePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -405,9 +512,16 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 	if err := json.Unmarshal(data, &cached); err != nil {
 		return err
 	}
-	m.access.Lock()
-	defer m.access.Unlock()
+	LogTiming("DynamicDirectBypass cache read took ", time.Since(startedAt),
+		" cached=", len(cached), " bytes=", len(data))
 	changed := false
+	type cachedRouteIP struct {
+		route dynamicDirectBypassRoute
+		ip    netip.Addr
+	}
+	toApply := make([]cachedRouteIP, 0, len(cached))
+	toDelete := make([]netip.Addr, 0)
+	hostCounts := map[string]int{}
 	for _, route := range cached {
 		ip, err := netip.ParseAddr(route.IP)
 		if err != nil || !isDynamicDirectBypassRouteIP(ip, m.config.ProtectedIPs) {
@@ -415,9 +529,49 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 			continue
 		}
 		if !now.Before(route.ExpiresAt) {
-			if err := m.routeManager.DeleteHostRoute(ctx, ip); err != nil {
-				Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete expired cached route failed: ", ip, " ", err)
+			toDelete = append(toDelete, ip)
+			changed = true
+			continue
+		}
+		host := normalizeDynamicDirectBypassHost(route.Host)
+		if host != "" {
+			if hostCounts[host] >= m.config.MaxRoutesPerHost {
+				changed = true
+				continue
 			}
+			hostCounts[host]++
+		}
+		if len(toApply) >= m.config.MaxRoutes {
+			changed = true
+			break
+		}
+		toApply = append(toApply, cachedRouteIP{route: route, ip: ip})
+	}
+	sortAddrSlice(toDelete)
+	stageStartedAt := time.Now()
+	deleteFailures := deleteDynamicDirectBypassHostRoutes(ctx, m.routeManager, toDelete)
+	LogTiming("DynamicDirectBypass cache delete expired routes took ", time.Since(stageStartedAt),
+		" routes=", len(toDelete), " failures=", len(deleteFailures),
+		" total ", time.Since(startedAt))
+	for _, ip := range toDelete {
+		if err := deleteFailures[ip]; err != nil {
+			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete expired cached route failed: ", ip, " ", err)
+		}
+	}
+	addrs := make([]netip.Addr, 0, len(toApply))
+	for _, item := range toApply {
+		addrs = append(addrs, item.ip)
+	}
+	stageStartedAt = time.Now()
+	addFailures := addDynamicDirectBypassHostRoutes(ctx, m.routeManager, addrs)
+	LogTiming("DynamicDirectBypass cache restore routes took ", time.Since(stageStartedAt),
+		" routes=", len(addrs), " failures=", len(addFailures),
+		" total ", time.Since(startedAt))
+	m.access.Lock()
+	defer m.access.Unlock()
+	for _, item := range toApply {
+		if err := addFailures[item.ip]; err != nil {
+			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass restore route failed: ", item.ip, " ", err)
 			changed = true
 			continue
 		}
@@ -425,16 +579,14 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 			changed = true
 			break
 		}
-		if err := m.routeManager.AddHostRoute(ctx, ip); err != nil {
-			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass restore route failed: ", ip, " ", err)
-			changed = true
-			continue
-		}
-		m.routes[ip] = route
+		m.routes[item.ip] = item.route
 	}
 	if changed {
 		m.saveCacheLocked()
 	}
+	LogTiming("DynamicDirectBypass cache restore finished in ", time.Since(startedAt),
+		" cached=", len(cached), " restored=", len(m.routes),
+		" expired=", len(toDelete), " changed=", changed)
 	return nil
 }
 
@@ -446,6 +598,7 @@ func cleanupDynamicDirectBypassCachedSystemRoutes(
 	if routeManager == nil || cachePath == "" {
 		return
 	}
+	startedAt := time.Now()
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -458,17 +611,97 @@ func cleanupDynamicDirectBypassCachedSystemRoutes(
 		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass cache cleanup parse failed: ", err)
 		return
 	}
+	LogTiming("DynamicDirectBypass cache cleanup read took ", time.Since(startedAt),
+		" cached=", len(cached), " bytes=", len(data))
+	toDelete := make([]netip.Addr, 0, len(cached))
 	for _, route := range cached {
 		ip, err := netip.ParseAddr(route.IP)
 		if err != nil {
 			continue
 		}
-		if err := routeManager.DeleteHostRoute(ctx, ip); err != nil {
+		toDelete = append(toDelete, ip)
+	}
+	sortAddrSlice(toDelete)
+	stageStartedAt := time.Now()
+	failures := deleteDynamicDirectBypassHostRoutes(ctx, routeManager, toDelete)
+	LogTiming("DynamicDirectBypass cache cleanup delete routes took ", time.Since(stageStartedAt),
+		" routes=", len(toDelete), " failures=", len(failures),
+		" total ", time.Since(startedAt))
+	hosts := map[string]string{}
+	for _, route := range cached {
+		if _, err := netip.ParseAddr(route.IP); err == nil {
+			hosts[route.IP] = route.Host
+		}
+	}
+	for _, ip := range toDelete {
+		if err := failures[ip]; err != nil {
 			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete cached route failed: ", ip, " ", err)
 			continue
 		}
-		Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass cached route deleted: ", route.Host, " -> ", ip)
+		Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass cached route deleted: ", hosts[ip.String()], " -> ", ip)
 	}
+	LogTiming("DynamicDirectBypass cache cleanup finished in ", time.Since(startedAt),
+		" cached=", len(cached), " deleted=", len(toDelete), " failures=", len(failures))
+}
+
+func addDynamicDirectBypassHostRoutes(
+	ctx context.Context,
+	routeManager dynamicDirectBypassRouteManager,
+	addrs []netip.Addr,
+) map[netip.Addr]error {
+	if len(addrs) == 0 {
+		return nil
+	}
+	if batchRouteManager, ok := routeManager.(dynamicDirectBypassBatchRouteManager); ok {
+		return batchRouteManager.AddHostRoutes(ctx, uniqueDynamicDirectBypassAddrs(addrs))
+	}
+	failures := map[netip.Addr]error{}
+	for _, addr := range uniqueDynamicDirectBypassAddrs(addrs) {
+		if err := routeManager.AddHostRoute(ctx, addr); err != nil {
+			failures[addr] = err
+		}
+	}
+	return failures
+}
+
+func deleteDynamicDirectBypassHostRoutes(
+	ctx context.Context,
+	routeManager dynamicDirectBypassRouteManager,
+	addrs []netip.Addr,
+) map[netip.Addr]error {
+	if len(addrs) == 0 {
+		return nil
+	}
+	if batchRouteManager, ok := routeManager.(dynamicDirectBypassBatchRouteManager); ok {
+		return batchRouteManager.DeleteHostRoutes(ctx, uniqueDynamicDirectBypassAddrs(addrs))
+	}
+	failures := map[netip.Addr]error{}
+	for _, addr := range uniqueDynamicDirectBypassAddrs(addrs) {
+		if err := routeManager.DeleteHostRoute(ctx, addr); err != nil {
+			failures[addr] = err
+		}
+	}
+	return failures
+}
+
+func uniqueDynamicDirectBypassAddrs(addrs []netip.Addr) []netip.Addr {
+	if len(addrs) == 0 {
+		return nil
+	}
+	seen := map[netip.Addr]struct{}{}
+	unique := make([]netip.Addr, 0, len(addrs))
+	for _, addr := range addrs {
+		if !addr.IsValid() {
+			continue
+		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
+		unique = append(unique, addr)
+	}
+	sortAddrSlice(unique)
+	return unique
 }
 
 func (m *dynamicDirectBypassManager) saveCacheLocked() {
@@ -507,19 +740,78 @@ func dynamicDirectBypassConnectionsFromTrackers(trackers []*trafficontrol.Tracke
 			host = tracker.Metadata.Destination.Fqdn
 		}
 		connections = append(connections, dynamicDirectBypassConnection{
-			Host:         host,
-			Destination:  tracker.Metadata.Destination.Addr,
-			Outbound:     tracker.Outbound,
-			OutboundType: tracker.OutboundType,
-			Chain:        tracker.Chain,
-			ProcessName:  processNameFromTracker(tracker),
-			ProcessPath:  processPathFromTracker(tracker),
-			ProcessID:    processIDFromTracker(tracker),
-			UserName:     userNameFromTracker(tracker),
-			PackageNames: packageNamesFromTracker(tracker),
+			ID:              tracker.ID.String(),
+			Host:            host,
+			Destination:     tracker.Metadata.Destination.Addr,
+			DestinationPort: tracker.Metadata.Destination.Port,
+			Network:         tracker.Metadata.Network,
+			Outbound:        tracker.Outbound,
+			OutboundType:    tracker.OutboundType,
+			Chain:           tracker.Chain,
+			Upload:          loadDynamicDirectBypassCounter(tracker.Upload),
+			Download:        loadDynamicDirectBypassCounter(tracker.Download),
+			CreatedAt:       tracker.CreatedAt,
+			ClosedAt:        tracker.ClosedAt,
+			ProcessName:     processNameFromTracker(tracker),
+			ProcessPath:     processPathFromTracker(tracker),
+			ProcessID:       processIDFromTracker(tracker),
+			UserName:        userNameFromTracker(tracker),
+			PackageNames:    packageNamesFromTracker(tracker),
 		})
 	}
 	return connections
+}
+
+func loadDynamicDirectBypassCounter(counter interface{ Load() int64 }) int64 {
+	if counter == nil {
+		return 0
+	}
+	return counter.Load()
+}
+
+type defaultDynamicDirectBypassDirectProbe struct{}
+
+func (defaultDynamicDirectBypassDirectProbe) ProbeDirect(
+	ctx context.Context,
+	host string,
+	ip netip.Addr,
+	port uint16,
+) error {
+	if port == 0 {
+		port = 443
+	}
+	probeCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := probeCtx.Deadline(); !hasDeadline {
+		probeCtx, cancel = context.WithTimeout(probeCtx, dynamicDirectBypassRemoteFailureProbeTimeout)
+	}
+	defer cancel()
+
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(probeCtx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := probeCtx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if port != 443 {
+		return nil
+	}
+	serverName := normalizeDynamicDirectBypassHost(host)
+	if serverName == "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(serverName); err == nil {
+		return nil
+	}
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: serverName})
+	if err := tlsConn.HandshakeContext(probeCtx); err != nil {
+		return err
+	}
+	_ = tlsConn.Close()
+	return nil
 }
 
 func dynamicDirectBypassProcessFromConnection(connection dynamicDirectBypassConnection) dynamicDirectBypassProcess {
@@ -653,9 +945,9 @@ func dynamicDirectBypassConfigFromOptions(options option.Options) dynamicDirectB
 	}
 	custom := *options.Custom
 	config.Enabled = boolFromCustom(custom[customDynamicDirectBypassEnabledKey], config.Enabled)
-	config.RouteTTL = time.Duration(routeConnectionLimitFromCustom(custom[customDynamicDirectBypassTTLKey], int(config.RouteTTL/time.Second))) * time.Second
-	config.MaxRoutes = routeConnectionLimitFromCustom(custom[customDynamicDirectBypassMaxRoutesKey], config.MaxRoutes)
-	config.MaxRoutesPerHost = routeConnectionLimitFromCustom(custom[customDynamicDirectBypassMaxRoutesHostKey], config.MaxRoutesPerHost)
+	config.RouteTTL = time.Duration(positiveIntFromCustom(custom[customDynamicDirectBypassTTLKey], int(config.RouteTTL/time.Second))) * time.Second
+	config.MaxRoutes = positiveIntFromCustom(custom[customDynamicDirectBypassMaxRoutesKey], config.MaxRoutes)
+	config.MaxRoutesPerHost = positiveIntFromCustom(custom[customDynamicDirectBypassMaxRoutesHostKey], config.MaxRoutesPerHost)
 	config.EagerSuffixes = stringSliceFromCustom(custom[customDynamicDirectBypassEagerSuffixesKey])
 	config.ProtectedIPs = protectedIPsFromOptions(options)
 	return normalizeDynamicDirectBypassConfig(config)
@@ -712,6 +1004,65 @@ func boolFromCustom(value any, fallback bool) bool {
 	return fallback
 }
 
+func positiveIntFromCustom(value any, fallback int) int {
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return typed
+		}
+	case int8:
+		if typed > 0 {
+			return int(typed)
+		}
+	case int16:
+		if typed > 0 {
+			return int(typed)
+		}
+	case int32:
+		if typed > 0 {
+			return int(typed)
+		}
+	case int64:
+		if typed > 0 && typed <= int64(^uint(0)>>1) {
+			return int(typed)
+		}
+	case uint:
+		if typed > 0 {
+			return int(typed)
+		}
+	case uint8:
+		if typed > 0 {
+			return int(typed)
+		}
+	case uint16:
+		if typed > 0 {
+			return int(typed)
+		}
+	case uint32:
+		if typed > 0 {
+			return int(typed)
+		}
+	case uint64:
+		if typed > 0 && typed <= uint64(^uint(0)>>1) {
+			return int(typed)
+		}
+	case float32:
+		if typed >= 1 {
+			return int(typed)
+		}
+	case float64:
+		if typed >= 1 {
+			return int(typed)
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
 func stringSliceFromCustom(value any) []string {
 	switch typed := value.(type) {
 	case []string:
@@ -747,6 +1098,33 @@ func isDynamicDirectBypassDirectConnection(connection dynamicDirectBypassConnect
 		}
 	}
 	return false
+}
+
+func isDynamicDirectBypassRemoteFailureConnection(connection dynamicDirectBypassConnection) bool {
+	if !strings.EqualFold(strings.TrimSpace(connection.Network), "tcp") {
+		return false
+	}
+	if connection.DestinationPort != 443 && connection.DestinationPort != 80 {
+		return false
+	}
+	if connection.ClosedAt.IsZero() {
+		return false
+	}
+	if !connection.CreatedAt.IsZero() {
+		duration := connection.ClosedAt.Sub(connection.CreatedAt)
+		if duration < 0 || duration > dynamicDirectBypassRemoteFailureMaxDuration {
+			return false
+		}
+	}
+	if connection.Upload <= 0 || connection.Download > dynamicDirectBypassRemoteFailureMaxDownload {
+		return false
+	}
+	outboundType := strings.ToLower(strings.TrimSpace(connection.OutboundType))
+	switch outboundType {
+	case "", constant.TypeDirect, constant.TypeBlock, constant.TypeDNS, constant.TypeSelector, constant.TypeURLTest, constant.TypeBalancer:
+		return false
+	}
+	return true
 }
 
 func isDynamicDirectBypassDirectTag(tag string) bool {
