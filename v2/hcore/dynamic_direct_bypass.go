@@ -28,10 +28,11 @@ const (
 	customDynamicDirectBypassMaxRoutesHostKey = "hiddify-dynamic-direct-bypass-max-routes-per-host"
 	customDynamicDirectBypassEagerSuffixesKey = "hiddify-dynamic-direct-bypass-eager-domain-suffixes"
 
-	dynamicDirectBypassRemoteFailureThreshold    = 2
-	dynamicDirectBypassRemoteFailureMaxDownload  = 64
-	dynamicDirectBypassRemoteFailureMaxDuration  = 30 * time.Second
-	dynamicDirectBypassRemoteFailureProbeTimeout = 3 * time.Second
+	dynamicDirectBypassRemoteFailureThreshold          = 1
+	dynamicDirectBypassRemoteFailureMaxDownload        = 64
+	dynamicDirectBypassRemoteFailureMaxDuration        = 30 * time.Second
+	dynamicDirectBypassRemoteFailureProbeTimeout       = 3 * time.Second
+	dynamicDirectBypassRemoteFailureProbeRetryInterval = 5 * time.Minute
 )
 
 type dynamicDirectBypassConfig struct {
@@ -93,6 +94,12 @@ type dynamicDirectBypassRoute struct {
 	LastSeen     time.Time `json:"last_seen"`
 }
 
+type dynamicDirectBypassRemoteProbeKey struct {
+	host string
+	ip   netip.Addr
+	port uint16
+}
+
 type dynamicDirectBypassRouteManager interface {
 	AddHostRoute(ctx context.Context, addr netip.Addr) error
 	DeleteHostRoute(ctx context.Context, addr netip.Addr) error
@@ -101,6 +108,24 @@ type dynamicDirectBypassRouteManager interface {
 type dynamicDirectBypassBatchRouteManager interface {
 	AddHostRoutes(ctx context.Context, addrs []netip.Addr) map[netip.Addr]error
 	DeleteHostRoutes(ctx context.Context, addrs []netip.Addr) map[netip.Addr]error
+}
+
+type cacheOnlyDynamicDirectBypassRouteManager struct{}
+
+func (cacheOnlyDynamicDirectBypassRouteManager) AddHostRoute(_ context.Context, _ netip.Addr) error {
+	return nil
+}
+
+func (cacheOnlyDynamicDirectBypassRouteManager) DeleteHostRoute(_ context.Context, _ netip.Addr) error {
+	return nil
+}
+
+func (cacheOnlyDynamicDirectBypassRouteManager) AddHostRoutes(_ context.Context, _ []netip.Addr) map[netip.Addr]error {
+	return nil
+}
+
+func (cacheOnlyDynamicDirectBypassRouteManager) DeleteHostRoutes(_ context.Context, _ []netip.Addr) map[netip.Addr]error {
+	return nil
 }
 
 type dynamicDirectBypassResolver interface {
@@ -127,6 +152,7 @@ type dynamicDirectBypassManager struct {
 	initialRestoreOnce sync.Once
 	access             sync.Mutex
 	routes             map[netip.Addr]dynamicDirectBypassRoute
+	failedRemoteProbes map[dynamicDirectBypassRemoteProbeKey]time.Time
 }
 
 func defaultDynamicDirectBypassConfig() dynamicDirectBypassConfig {
@@ -149,13 +175,14 @@ func newDynamicDirectBypassManager(
 ) *dynamicDirectBypassManager {
 	config = normalizeDynamicDirectBypassConfig(config)
 	return &dynamicDirectBypassManager{
-		config:       config,
-		routeManager: routeManager,
-		resolver:     resolver,
-		dnsCache:     dnsCache,
-		directProbe:  defaultDynamicDirectBypassDirectProbe{},
-		cachePath:    cachePath,
-		routes:       map[netip.Addr]dynamicDirectBypassRoute{},
+		config:             config,
+		routeManager:       routeManager,
+		resolver:           resolver,
+		dnsCache:           dnsCache,
+		directProbe:        defaultDynamicDirectBypassDirectProbe{},
+		cachePath:          cachePath,
+		routes:             map[netip.Addr]dynamicDirectBypassRoute{},
+		failedRemoteProbes: map[dynamicDirectBypassRemoteProbeKey]time.Time{},
 	}
 }
 
@@ -309,6 +336,9 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 			if len(m.routes) >= m.config.MaxRoutes {
 				return
 			}
+			if candidate.Reason == "remote-failure" && m.shouldSkipRemoteFailureProbeLocked(candidate, ip, now) {
+				continue
+			}
 			if err := m.routeManager.AddHostRoute(ctx, ip); err != nil {
 				Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass add route failed: ", ip, " ", err)
 				continue
@@ -318,9 +348,11 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 					if deleteErr := m.routeManager.DeleteHostRoute(ctx, ip); deleteErr != nil {
 						Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete failed remote fallback route failed: ", ip, " ", deleteErr)
 					}
+					m.markRemoteFailureProbeFailedLocked(candidate, ip, now)
 					Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass remote fallback direct probe failed: ", candidate.Host, " -> ", ip, " ", err)
 					continue
 				}
+				m.clearRemoteFailureProbeFailedLocked(candidate, ip)
 			}
 			m.routes[ip] = dynamicDirectBypassRoute{
 				Host:      candidate.Host,
@@ -345,6 +377,66 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 func (m *dynamicDirectBypassManager) notifyRoutesChanged() {
 	if m != nil && m.onRoutesChanged != nil {
 		m.onRoutesChanged()
+	}
+}
+
+func (m *dynamicDirectBypassManager) shouldSkipRemoteFailureProbeLocked(
+	candidate dynamicDirectBypassCandidate,
+	ip netip.Addr,
+	now time.Time,
+) bool {
+	if m == nil || len(m.failedRemoteProbes) == 0 {
+		return false
+	}
+	failedAt, exists := m.failedRemoteProbes[dynamicDirectBypassRemoteProbeKeyFor(candidate, ip)]
+	if !exists {
+		return false
+	}
+	if now.Sub(failedAt) >= dynamicDirectBypassRemoteFailureProbeRetryInterval {
+		delete(m.failedRemoteProbes, dynamicDirectBypassRemoteProbeKeyFor(candidate, ip))
+		return false
+	}
+	Log(LogLevel_DEBUG, LogType_CORE, "dynamic direct bypass remote fallback direct probe skipped: ",
+		candidate.Host, " -> ", ip)
+	return true
+}
+
+func (m *dynamicDirectBypassManager) markRemoteFailureProbeFailedLocked(
+	candidate dynamicDirectBypassCandidate,
+	ip netip.Addr,
+	now time.Time,
+) {
+	if m == nil {
+		return
+	}
+	if m.failedRemoteProbes == nil {
+		m.failedRemoteProbes = map[dynamicDirectBypassRemoteProbeKey]time.Time{}
+	}
+	m.failedRemoteProbes[dynamicDirectBypassRemoteProbeKeyFor(candidate, ip)] = now
+}
+
+func (m *dynamicDirectBypassManager) clearRemoteFailureProbeFailedLocked(
+	candidate dynamicDirectBypassCandidate,
+	ip netip.Addr,
+) {
+	if m == nil || len(m.failedRemoteProbes) == 0 {
+		return
+	}
+	delete(m.failedRemoteProbes, dynamicDirectBypassRemoteProbeKeyFor(candidate, ip))
+}
+
+func dynamicDirectBypassRemoteProbeKeyFor(
+	candidate dynamicDirectBypassCandidate,
+	ip netip.Addr,
+) dynamicDirectBypassRemoteProbeKey {
+	port := candidate.ProbePort
+	if port == 0 {
+		port = 443
+	}
+	return dynamicDirectBypassRemoteProbeKey{
+		host: normalizeDynamicDirectBypassHost(candidate.Host),
+		ip:   ip,
+		port: port,
 	}
 }
 

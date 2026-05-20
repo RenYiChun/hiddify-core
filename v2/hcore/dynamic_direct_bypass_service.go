@@ -14,19 +14,31 @@ import (
 )
 
 var (
-	dynamicDirectBypassRouteReloadDelay = 2 * time.Second
-	dynamicDirectBypassRouteReloadMu    sync.Mutex
-	dynamicDirectBypassRouteReloadTimer *time.Timer
-	dynamicDirectBypassRouteReloadFunc  = reloadDynamicDirectBypassRouteRules
+	dynamicDirectBypassRouteReloadDelay             = 2 * time.Second
+	dynamicDirectBypassRouteReloadIdleCheckInterval = 5 * time.Second
+	dynamicDirectBypassRouteReloadMaxWait           = 10 * time.Second
+	dynamicDirectBypassRouteReloadMu                sync.Mutex
+	dynamicDirectBypassRouteReloadTimer             *time.Timer
+	dynamicDirectBypassRouteReloadPendingSince      time.Time
+	dynamicDirectBypassRouteReloadFunc              = reloadDynamicDirectBypassRouteRules
+	dynamicDirectBypassRouteReloadActiveConnections = activeDynamicDirectBypassConnectionCount
+)
+
+type dynamicDirectBypassStartMode string
+
+const (
+	dynamicDirectBypassModeDisabled      dynamicDirectBypassStartMode = "disabled"
+	dynamicDirectBypassModeSystemRoute   dynamicDirectBypassStartMode = "system-route"
+	dynamicDirectBypassModeRuleCacheOnly dynamicDirectBypassStartMode = "rule-cache-only"
 )
 
 func startDynamicDirectBypassIfNeeded(options option.Options) {
 	startedAt := time.Now()
 	stopActiveDynamicDirectBypass(context.Background())
-	if runtime.GOOS != "windows" || !hasTunInbound(options) {
+	if runtime.GOOS != "windows" {
 		stageStartedAt := time.Now()
 		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
-		LogTiming("DynamicDirectBypass startup cleanup without TUN took ", time.Since(stageStartedAt),
+		LogTiming("DynamicDirectBypass startup cleanup without Windows took ", time.Since(stageStartedAt),
 			" total ", time.Since(startedAt))
 		return
 	}
@@ -38,26 +50,42 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 			" total ", time.Since(startedAt))
 		return
 	}
-	stageStartedAt := time.Now()
-	routeManager, err := newSystemDynamicDirectBypassRouteManager()
-	LogTiming("DynamicDirectBypass route manager init took ", time.Since(stageStartedAt),
-		" total ", time.Since(startedAt))
-	if err != nil {
-		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass disabled: ", err)
+	mode := dynamicDirectBypassModeForOptions(options)
+	if mode == dynamicDirectBypassModeDisabled {
+		stageStartedAt := time.Now()
+		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
+		LogTiming("DynamicDirectBypass startup cleanup without supported inbound took ", time.Since(stageStartedAt),
+			" total ", time.Since(startedAt))
 		return
+	}
+	var routeManager dynamicDirectBypassRouteManager
+	var dnsCache dynamicDirectBypassDNSCacheReader
+	if mode == dynamicDirectBypassModeSystemRoute {
+		stageStartedAt := time.Now()
+		systemRouteManager, err := newSystemDynamicDirectBypassRouteManager()
+		LogTiming("DynamicDirectBypass route manager init took ", time.Since(stageStartedAt),
+			" total ", time.Since(startedAt))
+		if err != nil {
+			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass disabled: ", err)
+			return
+		}
+		routeManager = systemRouteManager
+		dnsCache = newSystemDynamicDirectBypassDNSCacheReader()
+	} else {
+		routeManager = cacheOnlyDynamicDirectBypassRouteManager{}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := newDynamicDirectBypassManager(
 		config,
 		routeManager,
 		net.DefaultResolver,
-		newSystemDynamicDirectBypassDNSCacheReader(),
+		dnsCache,
 		filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"),
 	)
 	manager.onRoutesChanged = scheduleDynamicDirectBypassRouteReload
 	static.dynamicDirectBypassCancel = cancel
 	static.dynamicDirectBypass = manager
-	stageStartedAt = time.Now()
+	stageStartedAt := time.Now()
 	manager.restoreInitial(ctx, time.Now())
 	LogTiming("DynamicDirectBypass restore initial took ", time.Since(stageStartedAt),
 		" total ", time.Since(startedAt))
@@ -70,7 +98,7 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 		trackers = append(trackers, trafficManager.ClosedConnections()...)
 		return dynamicDirectBypassConnectionsFromTrackers(trackers)
 	})
-	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass started: mode=all-direct",
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass started: mode=", mode, " strategy=all-direct",
 		" ttl=", config.RouteTTL, " maxRoutes=", config.MaxRoutes, " maxRoutesPerHost=", config.MaxRoutesPerHost)
 	LogTiming("DynamicDirectBypass startup finished in ", time.Since(startedAt))
 }
@@ -109,14 +137,47 @@ func stopActiveDynamicDirectBypass(ctx context.Context) bool {
 
 func scheduleDynamicDirectBypassRouteReload() {
 	dynamicDirectBypassRouteReloadMu.Lock()
+	if dynamicDirectBypassRouteReloadPendingSince.IsZero() {
+		dynamicDirectBypassRouteReloadPendingSince = time.Now()
+	}
 	defer dynamicDirectBypassRouteReloadMu.Unlock()
+	scheduleDynamicDirectBypassRouteReloadLocked(dynamicDirectBypassRouteReloadDelay)
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload scheduled")
+}
+
+func scheduleDynamicDirectBypassRouteReloadLocked(delay time.Duration) {
 	if dynamicDirectBypassRouteReloadTimer != nil {
 		dynamicDirectBypassRouteReloadTimer.Stop()
 	}
-	dynamicDirectBypassRouteReloadTimer = time.AfterFunc(dynamicDirectBypassRouteReloadDelay, func() {
-		dynamicDirectBypassRouteReloadFunc(dynamicDirectBypassRouteReloadContext())
-	})
-	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload scheduled")
+	dynamicDirectBypassRouteReloadTimer = time.AfterFunc(delay, runScheduledDynamicDirectBypassRouteReload)
+}
+
+func runScheduledDynamicDirectBypassRouteReload() {
+	now := time.Now()
+	activeConnections := dynamicDirectBypassRouteReloadActiveConnections()
+	dynamicDirectBypassRouteReloadMu.Lock()
+	forceReload := !dynamicDirectBypassRouteReloadPendingSince.IsZero() &&
+		now.Sub(dynamicDirectBypassRouteReloadPendingSince) >= dynamicDirectBypassRouteReloadMaxWait
+	if activeConnections > 0 {
+		if forceReload {
+			dynamicDirectBypassRouteReloadTimer = nil
+			dynamicDirectBypassRouteReloadPendingSince = time.Time{}
+			dynamicDirectBypassRouteReloadMu.Unlock()
+			Log(LogLevel_INFO, LogType_CORE,
+				"dynamic direct bypass route-rule reload forced after wait: active connections=", activeConnections)
+			dynamicDirectBypassRouteReloadFunc(dynamicDirectBypassRouteReloadContext())
+			return
+		}
+		Log(LogLevel_INFO, LogType_CORE,
+			"dynamic direct bypass route-rule reload pending: active connections=", activeConnections)
+		scheduleDynamicDirectBypassRouteReloadLocked(dynamicDirectBypassRouteReloadIdleCheckInterval)
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		return
+	}
+	dynamicDirectBypassRouteReloadTimer = nil
+	dynamicDirectBypassRouteReloadPendingSince = time.Time{}
+	dynamicDirectBypassRouteReloadMu.Unlock()
+	dynamicDirectBypassRouteReloadFunc(dynamicDirectBypassRouteReloadContext())
 }
 
 func dynamicDirectBypassRouteReloadContext() context.Context {
@@ -133,6 +194,7 @@ func cancelDynamicDirectBypassRouteReload() {
 		dynamicDirectBypassRouteReloadTimer.Stop()
 		dynamicDirectBypassRouteReloadTimer = nil
 	}
+	dynamicDirectBypassRouteReloadPendingSince = time.Time{}
 }
 
 func reloadDynamicDirectBypassRouteRules(ctx context.Context) {
@@ -159,6 +221,14 @@ func reloadDynamicDirectBypassRouteRules(ctx context.Context) {
 	LogTiming("DynamicDirectBypass route-rule reload took ", time.Since(startedAt))
 }
 
+func activeDynamicDirectBypassConnectionCount() int {
+	trafficManager := static.TrafficManager()
+	if trafficManager == nil {
+		return 0
+	}
+	return len(trafficManager.Connections())
+}
+
 func cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx context.Context) {
 	if runtime.GOOS != "windows" {
 		return
@@ -183,6 +253,25 @@ func cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(ctx context.
 func hasTunInbound(options option.Options) bool {
 	for _, inbound := range options.Inbounds {
 		if inbound.Type == constant.TypeTun {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicDirectBypassModeForOptions(options option.Options) dynamicDirectBypassStartMode {
+	if hasTunInbound(options) {
+		return dynamicDirectBypassModeSystemRoute
+	}
+	if hasMixedInbound(options) {
+		return dynamicDirectBypassModeRuleCacheOnly
+	}
+	return dynamicDirectBypassModeDisabled
+}
+
+func hasMixedInbound(options option.Options) bool {
+	for _, inbound := range options.Inbounds {
+		if inbound.Type == constant.TypeMixed {
 			return true
 		}
 	}

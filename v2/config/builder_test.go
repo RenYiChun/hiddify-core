@@ -136,6 +136,14 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 	}
 }
 
+func TestDefaultHiddifyOptionsBypassLANEnabled(t *testing.T) {
+	hopt := DefaultHiddifyOptions()
+
+	if !hopt.BypassLAN {
+		t.Fatal("expected bypass LAN to be enabled by default")
+	}
+}
+
 func TestSetRoutingOptionsEnablesFindProcessForWindowsDynamicBypassTun(t *testing.T) {
 	options := option.Options{DNS: &option.DNSOptions{}}
 	hopt := DefaultHiddifyOptions()

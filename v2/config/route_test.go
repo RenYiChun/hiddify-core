@@ -82,6 +82,56 @@ func TestSetRoutingOptionsAddsDynamicDirectBypassIPRules(t *testing.T) {
 		t.Fatalf("expected dynamic direct bypass rule to use %q, got %q", OutboundDirectTag, rule.RouteOptions.Outbound)
 	}
 	assertStringSet(t, rule.IPCIDR, []string{"47.89.238.193/32", "47.88.73.20/32"})
+	domainRule := findDynamicDirectBypassDomainRule(options.Route.Rules)
+	if domainRule == nil {
+		t.Fatal("expected dynamic direct bypass domain route rule to be generated")
+	}
+	if domainRule.RouteOptions.Outbound != OutboundDirectTag {
+		t.Fatalf("expected dynamic direct bypass domain rule to use %q, got %q", OutboundDirectTag, domainRule.RouteOptions.Outbound)
+	}
+	assertStringSet(t, domainRule.Domain, []string{"smartservice.console.aliyun.com"})
+}
+
+func TestSetRoutingOptionsAddsDynamicDirectBypassDomainRulesOutsideTun(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+	if err := os.WriteFile(cachePath, []byte(`[
+		{"host":"smartservice.console.aliyun.com","ip":"47.96.247.67","expires_at":"`+future+`"}
+	]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun:      false,
+			SetSystemProxy: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN:                        true,
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassRoutesPath:    cachePath,
+			DynamicDirectBypassMaxRoutes:     128,
+			DynamicDirectBypassMaxRoutesHost: 32,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	domainRule := findDynamicDirectBypassDomainRule(options.Route.Rules)
+	if domainRule == nil {
+		t.Fatal("expected dynamic direct bypass domain route rule outside TUN")
+	}
+	if domainRule.RouteOptions.Outbound != OutboundDirectTag {
+		t.Fatalf("expected dynamic direct bypass domain rule to use %q, got %q", OutboundDirectTag, domainRule.RouteOptions.Outbound)
+	}
+	assertStringSet(t, domainRule.Domain, []string{"smartservice.console.aliyun.com"})
 }
 
 func TestSetRoutingOptionsKeepsDirectBootstrapResolverOutsideTun(t *testing.T) {
@@ -659,6 +709,19 @@ func findDynamicDirectBypassRule(rules []option.Rule) *option.DefaultRule {
 			continue
 		}
 		if containsString(defaultRule.IPCIDR, "47.89.238.193/32") {
+			return &defaultRule
+		}
+	}
+	return nil
+}
+
+func findDynamicDirectBypassDomainRule(rules []option.Rule) *option.DefaultRule {
+	for _, rule := range rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.RouteOptions.Outbound != OutboundDirectTag {
+			continue
+		}
+		if containsString(defaultRule.Domain, "smartservice.console.aliyun.com") {
 			return &defaultRule
 		}
 	}

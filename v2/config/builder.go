@@ -1446,37 +1446,61 @@ type dynamicDirectBypassRouteCacheEntry struct {
 }
 
 func appendDynamicDirectBypassRouteRules(routeRules []option.Rule, hopt *HiddifyOptions) []option.Rule {
-	cidrs := loadDynamicDirectBypassRouteCIDRs(hopt, time.Now())
-	if len(cidrs) == 0 {
+	matchers := loadDynamicDirectBypassRouteMatchers(hopt, time.Now())
+	if len(matchers.domains) == 0 && len(matchers.cidrs) == 0 {
 		return routeRules
 	}
-	return append(routeRules, option.Rule{
-		Type: C.RuleTypeDefault,
-		DefaultOptions: option.DefaultRule{
-			RawDefaultRule: option.RawDefaultRule{
-				IPCIDR: cidrs,
-			},
-			RuleAction: option.RuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.RouteActionOptions{
-					Outbound: OutboundDirectTag,
+	if len(matchers.domains) > 0 {
+		routeRules = append(routeRules, option.Rule{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultRule{
+				RawDefaultRule: option.RawDefaultRule{
+					Domain: matchers.domains,
+				},
+				RuleAction: option.RuleAction{
+					Action: C.RuleActionTypeRoute,
+					RouteOptions: option.RouteActionOptions{
+						Outbound: OutboundDirectTag,
+					},
 				},
 			},
-		},
-	})
+		})
+	}
+	if len(matchers.cidrs) > 0 {
+		routeRules = append(routeRules, option.Rule{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultRule{
+				RawDefaultRule: option.RawDefaultRule{
+					IPCIDR: matchers.cidrs,
+				},
+				RuleAction: option.RuleAction{
+					Action: C.RuleActionTypeRoute,
+					RouteOptions: option.RouteActionOptions{
+						Outbound: OutboundDirectTag,
+					},
+				},
+			},
+		})
+	}
+	return routeRules
 }
 
-func loadDynamicDirectBypassRouteCIDRs(hopt *HiddifyOptions, now time.Time) []string {
+type dynamicDirectBypassRouteMatchers struct {
+	domains []string
+	cidrs   []string
+}
+
+func loadDynamicDirectBypassRouteMatchers(hopt *HiddifyOptions, now time.Time) dynamicDirectBypassRouteMatchers {
 	if hopt == nil || !hopt.EnableDynamicDirectBypass || hopt.DynamicDirectBypassRoutesPath == "" {
-		return nil
+		return dynamicDirectBypassRouteMatchers{}
 	}
 	data, err := os.ReadFile(hopt.DynamicDirectBypassRoutesPath)
 	if err != nil {
-		return nil
+		return dynamicDirectBypassRouteMatchers{}
 	}
 	var entries []dynamicDirectBypassRouteCacheEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil
+		return dynamicDirectBypassRouteMatchers{}
 	}
 	maxRoutes := hopt.DynamicDirectBypassMaxRoutes
 	if maxRoutes <= 0 {
@@ -1487,7 +1511,9 @@ func loadDynamicDirectBypassRouteCIDRs(hopt *HiddifyOptions, now time.Time) []st
 		maxRoutesPerHost = DefaultDynamicDirectBypassMaxRoutesHost
 	}
 	hostCounts := map[string]int{}
-	seen := map[string]struct{}{}
+	seenCIDRs := map[string]struct{}{}
+	seenDomains := map[string]struct{}{}
+	domains := make([]string, 0, len(entries))
 	cidrs := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if len(cidrs) >= maxRoutes {
@@ -1510,15 +1536,25 @@ func loadDynamicDirectBypassRouteCIDRs(hopt *HiddifyOptions, now time.Time) []st
 			}
 			hostCounts[host]++
 		}
+		if isDynamicDirectBypassConfigRouteHost(host) {
+			if _, exists := seenDomains[host]; !exists {
+				seenDomains[host] = struct{}{}
+				domains = append(domains, host)
+			}
+		}
 		cidr := addr.String() + "/32"
-		if _, exists := seen[cidr]; exists {
+		if _, exists := seenCIDRs[cidr]; exists {
 			continue
 		}
-		seen[cidr] = struct{}{}
+		seenCIDRs[cidr] = struct{}{}
 		cidrs = append(cidrs, cidr)
 	}
+	sort.Strings(domains)
 	sort.Strings(cidrs)
-	return cidrs
+	return dynamicDirectBypassRouteMatchers{
+		domains: domains,
+		cidrs:   cidrs,
+	}
 }
 
 func isDynamicDirectBypassConfigRouteIP(addr netip.Addr) bool {
@@ -1530,6 +1566,16 @@ func isDynamicDirectBypassConfigRouteIP(addr netip.Addr) bool {
 		!addr.IsLinkLocalUnicast() &&
 		!addr.IsMulticast() &&
 		!addr.IsUnspecified()
+}
+
+func isDynamicDirectBypassConfigRouteHost(host string) bool {
+	if host == "" || strings.ContainsAny(host, " \t\r\n/") {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+	return true
 }
 
 func isDynamicDirectBypassConfigSelfRoute(entry dynamicDirectBypassRouteCacheEntry) bool {

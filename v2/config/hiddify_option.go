@@ -154,7 +154,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		RouteOptions: RouteOptions{
 			ResolveDestination:               false,
 			IPv6Mode:                         option.DomainStrategy(dns.DomainStrategyAsIS),
-			BypassLAN:                        false,
+			BypassLAN:                        true,
 			AllowConnectionFromLAN:           false,
 			DirectRouteConnectionLimit:       DefaultDirectRouteConnectionLimit,
 			ProxyRouteConnectionLimit:        DefaultProxyRouteConnectionLimit,

@@ -7,9 +7,11 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -72,6 +74,47 @@ func (f fakeDynamicDirectBypassDNSCacheReader) LookupCachedHostIPs(
 func (f *fakeDynamicDirectBypassDirectProbe) ProbeDirect(_ context.Context, host string, ip netip.Addr, port uint16) error {
 	f.calls = append(f.calls, fakeDynamicDirectBypassDirectProbeCall{host: host, ip: ip, port: port})
 	return f.err
+}
+
+func TestDynamicDirectBypassModeForOptionsIncludesMixedInbound(t *testing.T) {
+	tests := []struct {
+		name    string
+		options option.Options
+		want    dynamicDirectBypassStartMode
+	}{
+		{
+			name: "tun keeps system route mode",
+			options: option.Options{
+				Inbounds: []option.Inbound{
+					{Type: constant.TypeMixed},
+					{Type: constant.TypeTun},
+				},
+			},
+			want: dynamicDirectBypassModeSystemRoute,
+		},
+		{
+			name: "mixed without tun uses cache only mode",
+			options: option.Options{
+				Inbounds: []option.Inbound{
+					{Type: constant.TypeMixed},
+				},
+			},
+			want: dynamicDirectBypassModeRuleCacheOnly,
+		},
+		{
+			name:    "no supported inbound disables dynamic direct bypass",
+			options: option.Options{},
+			want:    dynamicDirectBypassModeDisabled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dynamicDirectBypassModeForOptions(tt.options); got != tt.want {
+				t.Fatalf("expected %s, got %s", tt.want, got)
+			}
+		})
+	}
 }
 
 func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
@@ -248,13 +291,12 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresHiddifyOwnTraffic(t *testing.
 	}
 }
 
-func TestSelectDynamicDirectBypassCandidatesSelectsRepeatedRemoteHandshakeFailure(t *testing.T) {
+func TestSelectDynamicDirectBypassCandidatesSelectsSingleRemoteHandshakeFailure(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
 		MaxRoutesPerHost: 4,
 	}
 	connections := []dynamicDirectBypassConnection{
-		remoteHandshakeFailureConnection("smartservice.console.aliyun.com", "47.89.238.193"),
 		remoteHandshakeFailureConnection("smartservice.console.aliyun.com", "47.89.238.193"),
 	}
 
@@ -271,7 +313,7 @@ func TestSelectDynamicDirectBypassCandidatesSelectsRepeatedRemoteHandshakeFailur
 	}
 }
 
-func TestSelectDynamicDirectBypassCandidatesIgnoresSingleAndResponsiveRemoteFailure(t *testing.T) {
+func TestSelectDynamicDirectBypassCandidatesIgnoresResponsiveRemoteFailure(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
 		MaxRoutesPerHost: 4,
@@ -279,14 +321,13 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresSingleAndResponsiveRemoteFail
 	responsive := remoteHandshakeFailureConnection("www.aliyun.com", "47.246.23.233")
 	responsive.Download = 512
 	connections := []dynamicDirectBypassConnection{
-		remoteHandshakeFailureConnection("smartservice.console.aliyun.com", "47.89.238.193"),
 		responsive,
 	}
 
 	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
 
 	if len(candidates) != 0 {
-		t.Fatalf("expected single or responsive remote failures not to be bypassed, got %#v", candidates)
+		t.Fatalf("expected responsive remote failures not to be bypassed, got %#v", candidates)
 	}
 }
 
@@ -377,6 +418,42 @@ func TestDynamicDirectBypassManagerKeepsRemoteFailureRouteOnlyAfterSuccessfulDir
 	}
 }
 
+func TestDynamicDirectBypassManagerCachesRemoteFailureRouteInCacheOnlyMode(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	probe := &fakeDynamicDirectBypassDirectProbe{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, cacheOnlyDynamicDirectBypassRouteManager{}, nil, nil, cachePath)
+	manager.directProbe = probe
+	notifications := 0
+	manager.onRoutesChanged = func() {
+		notifications++
+	}
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "smartservice.console.aliyun.com",
+		IPs:       []netip.Addr{netip.MustParseAddr("47.89.238.193")},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(probe.calls) != 1 || probe.calls[0].ip != netip.MustParseAddr("47.89.238.193") {
+		t.Fatalf("expected cache-only remote failure route to be probed, got %#v", probe.calls)
+	}
+	cached := readDynamicDirectBypassCache(t, cachePath)
+	if len(cached) != 1 || cached[0].IP != "47.89.238.193" {
+		t.Fatalf("expected successful cache-only direct probe route to be cached, got %#v", cached)
+	}
+	if notifications != 1 {
+		t.Fatalf("expected cache-only route to notify route-rule reload once, got %d", notifications)
+	}
+}
+
 func TestDynamicDirectBypassManagerNotifiesWhenNewRouteCanAffectRoutingRules(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
@@ -433,8 +510,10 @@ func TestDynamicDirectBypassManagerNotifiesWhenRouteExpires(t *testing.T) {
 
 func TestScheduleDynamicDirectBypassRouteReloadDebounces(t *testing.T) {
 	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousMaxWait := dynamicDirectBypassRouteReloadMaxWait
 	previousReload := dynamicDirectBypassRouteReloadFunc
 	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadMaxWait = time.Second
 	reloaded := make(chan struct{}, 2)
 	dynamicDirectBypassRouteReloadFunc = func(context.Context) {
 		reloaded <- struct{}{}
@@ -445,8 +524,10 @@ func TestScheduleDynamicDirectBypassRouteReloadDebounces(t *testing.T) {
 			dynamicDirectBypassRouteReloadTimer.Stop()
 			dynamicDirectBypassRouteReloadTimer = nil
 		}
+		dynamicDirectBypassRouteReloadPendingSince = time.Time{}
 		dynamicDirectBypassRouteReloadMu.Unlock()
 		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadMaxWait = previousMaxWait
 		dynamicDirectBypassRouteReloadFunc = previousReload
 	})
 
@@ -465,13 +546,103 @@ func TestScheduleDynamicDirectBypassRouteReloadDebounces(t *testing.T) {
 	}
 }
 
+func TestScheduleDynamicDirectBypassRouteReloadWaitsForIdleConnections(t *testing.T) {
+	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousIdleDelay := dynamicDirectBypassRouteReloadIdleCheckInterval
+	previousMaxWait := dynamicDirectBypassRouteReloadMaxWait
+	previousReload := dynamicDirectBypassRouteReloadFunc
+	previousActiveConnections := dynamicDirectBypassRouteReloadActiveConnections
+	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadIdleCheckInterval = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadMaxWait = time.Second
+	var activeConnections int32 = 1
+	reloaded := make(chan struct{}, 1)
+	dynamicDirectBypassRouteReloadFunc = func(context.Context) {
+		reloaded <- struct{}{}
+	}
+	dynamicDirectBypassRouteReloadActiveConnections = func() int {
+		return int(atomic.LoadInt32(&activeConnections))
+	}
+	t.Cleanup(func() {
+		dynamicDirectBypassRouteReloadMu.Lock()
+		if dynamicDirectBypassRouteReloadTimer != nil {
+			dynamicDirectBypassRouteReloadTimer.Stop()
+			dynamicDirectBypassRouteReloadTimer = nil
+		}
+		dynamicDirectBypassRouteReloadPendingSince = time.Time{}
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadIdleCheckInterval = previousIdleDelay
+		dynamicDirectBypassRouteReloadMaxWait = previousMaxWait
+		dynamicDirectBypassRouteReloadFunc = previousReload
+		dynamicDirectBypassRouteReloadActiveConnections = previousActiveConnections
+	})
+
+	scheduleDynamicDirectBypassRouteReload()
+
+	select {
+	case <-reloaded:
+		t.Fatal("expected route-rule reload to wait while active connections exist")
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	atomic.StoreInt32(&activeConnections, 0)
+	select {
+	case <-reloaded:
+	case <-time.After(time.Second):
+		t.Fatal("expected pending route-rule reload after active connections drain")
+	}
+}
+
+func TestScheduleDynamicDirectBypassRouteReloadForcesAfterMaxWait(t *testing.T) {
+	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousIdleDelay := dynamicDirectBypassRouteReloadIdleCheckInterval
+	previousMaxWait := dynamicDirectBypassRouteReloadMaxWait
+	previousReload := dynamicDirectBypassRouteReloadFunc
+	previousActiveConnections := dynamicDirectBypassRouteReloadActiveConnections
+	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadIdleCheckInterval = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadMaxWait = 25 * time.Millisecond
+	reloaded := make(chan struct{}, 1)
+	dynamicDirectBypassRouteReloadFunc = func(context.Context) {
+		reloaded <- struct{}{}
+	}
+	dynamicDirectBypassRouteReloadActiveConnections = func() int {
+		return 1
+	}
+	t.Cleanup(func() {
+		dynamicDirectBypassRouteReloadMu.Lock()
+		if dynamicDirectBypassRouteReloadTimer != nil {
+			dynamicDirectBypassRouteReloadTimer.Stop()
+			dynamicDirectBypassRouteReloadTimer = nil
+		}
+		dynamicDirectBypassRouteReloadPendingSince = time.Time{}
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadIdleCheckInterval = previousIdleDelay
+		dynamicDirectBypassRouteReloadMaxWait = previousMaxWait
+		dynamicDirectBypassRouteReloadFunc = previousReload
+		dynamicDirectBypassRouteReloadActiveConnections = previousActiveConnections
+	})
+
+	scheduleDynamicDirectBypassRouteReload()
+
+	select {
+	case <-reloaded:
+	case <-time.After(time.Second):
+		t.Fatal("expected route-rule reload to force after max wait")
+	}
+}
+
 func TestScheduleDynamicDirectBypassRouteReloadUsesBaseContext(t *testing.T) {
 	type reloadContextTestKey struct{}
 
 	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousMaxWait := dynamicDirectBypassRouteReloadMaxWait
 	previousReload := dynamicDirectBypassRouteReloadFunc
 	previousBaseContext := static.BaseContext
 	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadMaxWait = time.Second
 	key := reloadContextTestKey{}
 	static.BaseContext = context.WithValue(context.Background(), key, "base-context")
 	reloaded := make(chan any, 1)
@@ -484,8 +655,10 @@ func TestScheduleDynamicDirectBypassRouteReloadUsesBaseContext(t *testing.T) {
 			dynamicDirectBypassRouteReloadTimer.Stop()
 			dynamicDirectBypassRouteReloadTimer = nil
 		}
+		dynamicDirectBypassRouteReloadPendingSince = time.Time{}
 		dynamicDirectBypassRouteReloadMu.Unlock()
 		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadMaxWait = previousMaxWait
 		dynamicDirectBypassRouteReloadFunc = previousReload
 		static.BaseContext = previousBaseContext
 	})
@@ -537,6 +710,47 @@ func TestDynamicDirectBypassManagerDropsRemoteFailureRouteWhenDirectProbeFails(t
 		t.Fatalf("expected failed direct probe route not to be cached, got %#v", cached)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+func TestDynamicDirectBypassManagerBacksOffFailedRemoteProbe(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	probe := &fakeDynamicDirectBypassDirectProbe{err: errors.New("direct tls handshake failed")}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, cachePath)
+	manager.directProbe = probe
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "mtalk.google.com",
+		IPs:       []netip.Addr{netip.MustParseAddr("142.250.99.188")},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(time.Minute))
+
+	if len(probe.calls) != 1 {
+		t.Fatalf("expected recent failed direct probe to be skipped, got %#v", probe.calls)
+	}
+	if len(routeManager.added) != 1 || len(routeManager.deleted) != 1 {
+		t.Fatalf("expected one temporary route for failed probe, got added=%#v deleted=%#v", routeManager.added, routeManager.deleted)
+	}
+
+	probe.err = nil
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(6*time.Minute))
+
+	if len(probe.calls) != 2 {
+		t.Fatalf("expected direct probe to retry after backoff, got %#v", probe.calls)
+	}
+	cached := readDynamicDirectBypassCache(t, cachePath)
+	if len(cached) != 1 || cached[0].IP != "142.250.99.188" {
+		t.Fatalf("expected successful retry to be cached, got %#v", cached)
 	}
 }
 
