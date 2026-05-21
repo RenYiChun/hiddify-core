@@ -36,6 +36,9 @@ func TestSetExperimentalPrefersReliableHTTPSConnectionTestURLs(t *testing.T) {
 	if options.Experimental.Monitoring.Workers != 3 {
 		t.Fatalf("expected monitoring workers to be capped at 3, got %d", options.Experimental.Monitoring.Workers)
 	}
+	if got := options.Experimental.Monitoring.URLTestLogFile; got != "data/url-test.log" {
+		t.Fatalf("expected URL test log file %q, got %q", "data/url-test.log", got)
+	}
 }
 
 func TestSetHiddifyCustomOptionsAddsRouteAdmissionLimits(t *testing.T) {

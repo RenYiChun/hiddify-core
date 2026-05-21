@@ -51,6 +51,11 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 		return
 	}
 	mode := dynamicDirectBypassModeForOptions(options)
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass startup selected: mode=", mode,
+		" hasTun=", hasTunInbound(options), " hasMixed=", hasMixedInbound(options),
+		" inbounds=", len(options.Inbounds), " outbounds=", len(options.Outbounds),
+		" routeRules=", dynamicDirectBypassRouteRuleCount(options),
+		" dnsServers=", dynamicDirectBypassDNSServerCount(options))
 	if mode == dynamicDirectBypassModeDisabled {
 		stageStartedAt := time.Now()
 		cleanupDynamicDirectBypassCachedSystemRoutesWithDefaultManager(context.Background())
@@ -205,11 +210,16 @@ func reloadDynamicDirectBypassRouteRules(ctx context.Context) {
 		Log(LogLevel_DEBUG, LogType_CORE, "dynamic direct bypass route-rule reload skipped: service not started")
 		return
 	}
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload begin")
 	options, err := BuildConfig(ctx, static.previousStartRequest)
 	if err != nil {
 		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass route-rule reload build failed: ", err)
 		return
 	}
+	Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload applying: hasTun=", hasTunInbound(*options),
+		" hasMixed=", hasMixedInbound(*options), " inbounds=", len(options.Inbounds),
+		" outbounds=", len(options.Outbounds), " routeRules=", dynamicDirectBypassRouteRuleCount(*options),
+		" dnsServers=", dynamicDirectBypassDNSServerCount(*options))
 	currentBuildConfigPath := filepath.Join(sWorkingPath, "data/current-config.json")
 	if err := config.SaveCurrentConfig(ctx, currentBuildConfigPath, *options); err != nil {
 		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass route-rule reload save config failed: ", err)
@@ -276,4 +286,18 @@ func hasMixedInbound(options option.Options) bool {
 		}
 	}
 	return false
+}
+
+func dynamicDirectBypassRouteRuleCount(options option.Options) int {
+	if options.Route == nil {
+		return 0
+	}
+	return len(options.Route.Rules)
+}
+
+func dynamicDirectBypassDNSServerCount(options option.Options) int {
+	if options.DNS == nil {
+		return 0
+	}
+	return len(options.DNS.Servers)
 }

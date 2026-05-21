@@ -298,7 +298,7 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
 					Server:         DNSRemoteNoWarpTag,
-					Strategy:       hopt.DirectDnsDomainStrategy,
+					Strategy:       effectiveDirectDNSDomainStrategy(hopt),
 					BypassIfFailed: true,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 				},

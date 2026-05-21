@@ -137,6 +137,7 @@ func patchEndpoint(base *option.Endpoint, configOpt HiddifyOptions, staticIPs *m
 func patchOutbound(base option.Outbound, configOpt HiddifyOptions, staticIPs *map[string][]string) (*option.Outbound, error) {
 
 	base = patchOutboundTLSTricks(base, configOpt)
+	base = patchOutboundIPv6Mode(base, configOpt)
 
 	// switch base.Type {
 	// case C.TypeVMess, C.TypeVLESS, C.TypeTrojan, C.TypeShadowsocks:
@@ -145,6 +146,23 @@ func patchOutbound(base option.Outbound, configOpt HiddifyOptions, staticIPs *ma
 	// base = patchOutboundXray(base, configOpt, *staticIPs)
 
 	return &base, nil
+}
+
+func patchOutboundIPv6Mode(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
+	if configOpt.IPv6Mode != option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		return base
+	}
+	opts, ok := base.Options.(option.DialerOptionsWrapper)
+	if !ok {
+		return base
+	}
+	dialer := opts.TakeDialerOptions()
+	if dialer.DomainResolver != nil {
+		dialer.DomainResolver.Strategy = effectiveDomainStrategyForIPv6Mode(dialer.DomainResolver.Strategy, &configOpt)
+	}
+	dialer.DomainStrategy = effectiveDomainStrategyForIPv6Mode(dialer.DomainStrategy, &configOpt)
+	opts.ReplaceDialerOptions(dialer)
+	return base
 }
 
 // func patchOutboundXray(base option.Outbound, configOpt HiddifyOptions, staticIpsDns map[string][]string) outboundMap {

@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"time"
 )
+
+const windowsDNSCacheDiscoveryTimeout = 15 * time.Second
 
 type windowsDynamicDirectBypassDNSCacheReader struct{}
 
@@ -30,7 +33,7 @@ func (windowsDynamicDirectBypassDNSCacheReader) LookupCachedHostIPs(
 	if len(suffixes) == 0 {
 		return nil, nil
 	}
-	cmd, cancel := newHiddenDynamicDirectBypassCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", windowsDNSCacheDiscoveryScript())
+	cmd, _, cancel := newHiddenDynamicDirectBypassCommandWithTimeout(ctx, windowsDNSCacheDiscoveryTimeout, "powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", windowsDNSCacheDiscoveryScript())
 	defer cancel()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

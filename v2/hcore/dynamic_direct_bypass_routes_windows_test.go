@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewHiddenDynamicDirectBypassCommandHidesChildWindow(t *testing.T) {
@@ -35,10 +36,34 @@ func TestWindowsDefaultRouteDiscoveryScriptOutputsJson(t *testing.T) {
 	if !strings.Contains(script, "Write-Error") {
 		t.Fatalf("expected discovery script to fail explicitly when no route is found: %s", script)
 	}
+	if !strings.Contains(script, "InterfaceAlias") {
+		t.Fatalf("expected discovery script to include selected interface alias for diagnostics: %s", script)
+	}
+	if !strings.Contains(script, "RouteMetric") || !strings.Contains(script, "InterfaceMetric") {
+		t.Fatalf("expected discovery script to include route metrics for diagnostics: %s", script)
+	}
+}
+
+func TestWindowsRouteBatchTimeoutScalesWithRouteCount(t *testing.T) {
+	singleRouteTimeout := windowsRouteBatchTimeout(1)
+	manyRoutesTimeout := windowsRouteBatchTimeout(111)
+
+	if singleRouteTimeout < 10*time.Second {
+		t.Fatalf("expected a safe minimum timeout for route batch command, got %s", singleRouteTimeout)
+	}
+	if manyRoutesTimeout <= singleRouteTimeout {
+		t.Fatalf("expected timeout to grow with route count, got single=%s many=%s", singleRouteTimeout, manyRoutesTimeout)
+	}
+	if manyRoutesTimeout < 20*time.Second {
+		t.Fatalf("expected timeout to cover restoring 100+ cached routes, got %s", manyRoutesTimeout)
+	}
+	if manyRoutesTimeout > time.Minute {
+		t.Fatalf("expected timeout to remain bounded, got %s", manyRoutesTimeout)
+	}
 }
 
 func TestWindowsRouteBatchScriptReadsJSONInputAsIndividualIPs(t *testing.T) {
-	route := &windowsDefaultRoute{InterfaceIndex: 1, NextHop: "192.0.2.1"}
+	route := &windowsDefaultRoute{InterfaceIndex: 1, NextHop: "192.0.2.1", InterfaceAlias: "Ethernet"}
 	script := windowsAddHostRoutesScript(route)
 	cutoff := strings.Index(script, "try {")
 	if cutoff < 0 {

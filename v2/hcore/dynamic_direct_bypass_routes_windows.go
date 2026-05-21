@@ -16,7 +16,14 @@ import (
 	"time"
 )
 
-const windowsCreateNoWindow = 0x08000000
+const (
+	windowsCreateNoWindow            = 0x08000000
+	windowsCommandDefaultTimeout     = 5 * time.Second
+	windowsRouteBatchBaseTimeout     = 5 * time.Second
+	windowsRouteBatchMinTimeout      = 10 * time.Second
+	windowsRouteBatchPerRouteTimeout = 150 * time.Millisecond
+	windowsRouteBatchMaxTimeout      = time.Minute
+)
 
 type windowsDynamicDirectBypassRouteManager struct {
 	access       sync.Mutex
@@ -24,8 +31,11 @@ type windowsDynamicDirectBypassRouteManager struct {
 }
 
 type windowsDefaultRoute struct {
-	InterfaceIndex int    `json:"InterfaceIndex"`
-	NextHop        string `json:"NextHop"`
+	InterfaceIndex  int    `json:"InterfaceIndex"`
+	NextHop         string `json:"NextHop"`
+	InterfaceAlias  string `json:"InterfaceAlias,omitempty"`
+	RouteMetric     int    `json:"RouteMetric,omitempty"`
+	InterfaceMetric int    `json:"InterfaceMetric,omitempty"`
 }
 
 func newSystemDynamicDirectBypassRouteManager() (dynamicDirectBypassRouteManager, error) {
@@ -110,7 +120,8 @@ func discoverWindowsDefaultRoute(ctx context.Context) (*windowsDefaultRoute, err
 		return nil, fmt.Errorf("no usable physical default route found")
 	}
 	LogTiming("DynamicDirectBypass Windows default route discovery took ", time.Since(startedAt),
-		" if=", route.InterfaceIndex, " nextHop=", route.NextHop)
+		" if=", route.InterfaceIndex, " alias=", route.InterfaceAlias, " nextHop=", route.NextHop,
+		" routeMetric=", route.RouteMetric, " interfaceMetric=", route.InterfaceMetric)
 	return &route, nil
 }
 
@@ -121,7 +132,7 @@ func windowsDefaultRouteDiscoveryScript() string {
 		`if (-not $route) { $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | ` +
 		`Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1 }; ` +
 		`if (-not $route) { Write-Error 'no usable physical default route found'; exit 2 }; ` +
-		`[pscustomobject]@{ InterfaceIndex = $route.InterfaceIndex; NextHop = $route.NextHop } | ConvertTo-Json -Compress`
+		`[pscustomobject]@{ InterfaceIndex = $route.InterfaceIndex; NextHop = $route.NextHop; InterfaceAlias = $route.InterfaceAlias; RouteMetric = $route.RouteMetric; InterfaceMetric = $route.InterfaceMetric } | ConvertTo-Json -Compress`
 }
 
 func runRouteCommand(ctx context.Context, args ...string) error {
@@ -159,16 +170,20 @@ func runWindowsRouteBatchCommand(ctx context.Context, operation string, script s
 	if err != nil {
 		return dynamicDirectBypassBatchError(addrs, err)
 	}
-	cmd, cancel := newHiddenDynamicDirectBypassCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	timeout := windowsRouteBatchTimeout(len(ips))
+	cmd, cmdCtx, cancel := newHiddenDynamicDirectBypassCommandWithTimeout(ctx, timeout, "powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 	defer cancel()
 	cmd.Stdin = bytes.NewReader(payload)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		timedOut := cmdCtx.Err() == context.DeadlineExceeded
 		LogTiming("DynamicDirectBypass Windows route batch ", operation, " failed after ", time.Since(startedAt),
-			" routes=", len(ips))
-		return dynamicDirectBypassBatchError(addrs, fmt.Errorf("route batch failed: %w: %s %s", err, strings.TrimSpace(string(output)), strings.TrimSpace(stderr.String())))
+			" routes=", len(ips), " timeout=", timeout, " timedOut=", timedOut,
+			" stdout=", strings.TrimSpace(string(output)), " stderr=", strings.TrimSpace(stderr.String()))
+		return dynamicDirectBypassBatchError(addrs, fmt.Errorf("route batch failed: %w: timeout=%s timedOut=%t stdout=%q stderr=%q",
+			err, timeout, timedOut, strings.TrimSpace(string(output)), strings.TrimSpace(stderr.String())))
 	}
 	output = bytes.TrimSpace(output)
 	if len(output) == 0 {
@@ -189,8 +204,19 @@ func runWindowsRouteBatchCommand(ctx context.Context, operation string, script s
 		result[ip] = fmt.Errorf("%s", failure.Error)
 	}
 	LogTiming("DynamicDirectBypass Windows route batch ", operation, " took ", time.Since(startedAt),
-		" routes=", len(ips), " failures=", len(result))
+		" routes=", len(ips), " failures=", len(result), " timeout=", timeout)
 	return result
+}
+
+func windowsRouteBatchTimeout(routeCount int) time.Duration {
+	timeout := windowsRouteBatchBaseTimeout + time.Duration(routeCount)*windowsRouteBatchPerRouteTimeout
+	if timeout < windowsRouteBatchMinTimeout {
+		return windowsRouteBatchMinTimeout
+	}
+	if timeout > windowsRouteBatchMaxTimeout {
+		return windowsRouteBatchMaxTimeout
+	}
+	return timeout
 }
 
 func dynamicDirectBypassBatchError(addrs []netip.Addr, err error) map[netip.Addr]error {
@@ -250,18 +276,26 @@ if ($failures.Count -eq 0) { '[]' } else { ConvertTo-Json -Compress -InputObject
 }
 
 func newHiddenDynamicDirectBypassCommand(ctx context.Context, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
-	cmdCtx, cancel := dynamicDirectBypassCommandContext(ctx)
+	cmd, _, cancel := newHiddenDynamicDirectBypassCommandWithTimeout(ctx, windowsCommandDefaultTimeout, name, args...)
+	return cmd, cancel
+}
+
+func newHiddenDynamicDirectBypassCommandWithTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+	cmdCtx, cancel := dynamicDirectBypassCommandContext(ctx, timeout)
 	cmd := exec.CommandContext(cmdCtx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: windowsCreateNoWindow,
 	}
-	return cmd, cancel
+	return cmd, cmdCtx, cancel
 }
 
-func dynamicDirectBypassCommandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func dynamicDirectBypassCommandContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, 5*time.Second)
+	if timeout <= 0 {
+		timeout = windowsCommandDefaultTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }

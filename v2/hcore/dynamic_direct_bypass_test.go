@@ -154,6 +154,7 @@ func TestSelectDynamicDirectBypassCandidatesSelectsEveryDirectDestination(t *tes
 			Outbound:     "direct §hide§",
 			OutboundType: "direct",
 			Chain:        []string{"direct §hide§"},
+			Download:     512,
 		},
 		{
 			Host:         "proxied.example.com",
@@ -174,6 +175,39 @@ func TestSelectDynamicDirectBypassCandidatesSelectsEveryDirectDestination(t *tes
 	}
 	if candidates[1].Host != "low.example.cn" || !containsAddr(candidates[1].IPs, netip.MustParseAddr("101.226.99.155")) {
 		t.Fatalf("expected low-count direct host candidate, got %#v", candidates[1])
+	}
+}
+
+func TestSelectDynamicDirectBypassCandidatesIgnoresDirectAttemptWithoutResponse(t *testing.T) {
+	cfg := dynamicDirectBypassConfig{
+		Enabled:          true,
+		MaxRoutesPerHost: 4,
+	}
+	connections := []dynamicDirectBypassConnection{
+		{
+			Host:         "chatgpt.com",
+			Destination:  netip.MustParseAddr("104.18.32.47"),
+			Outbound:     "direct §hide§",
+			OutboundType: "direct",
+			Chain:        []string{"direct §hide§"},
+			Upload:       512,
+			Download:     0,
+		},
+		{
+			Host:         "chatgpt.com",
+			Destination:  netip.MustParseAddr("172.64.155.209"),
+			Outbound:     "direct §hide§",
+			OutboundType: "direct",
+			Chain:        []string{"direct §hide§"},
+			Upload:       512,
+			Download:     dynamicDirectBypassDirectMinDownload,
+		},
+	}
+
+	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+
+	if len(candidates) != 0 {
+		t.Fatalf("expected unresponsive direct attempts not to seed dynamic bypass routes, got %#v", candidates)
 	}
 }
 
@@ -281,6 +315,7 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresHiddifyOwnTraffic(t *testing.
 			Chain:        []string{"direct §hide§"},
 			ProcessName:  "Hiddify.exe",
 			ProcessPath:  `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\Hiddify.exe`,
+			Download:     512,
 		},
 	}
 
@@ -463,6 +498,7 @@ func TestDynamicDirectBypassManagerNotifiesWhenNewRouteCanAffectRoutingRules(t *
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
 	}, routeManager, nil, nil, "")
+	manager.directProbe = &fakeDynamicDirectBypassDirectProbe{}
 	notifications := 0
 	manager.onRoutesChanged = func() {
 		notifications++
@@ -713,6 +749,95 @@ func TestDynamicDirectBypassManagerDropsRemoteFailureRouteWhenDirectProbeFails(t
 	}
 }
 
+func TestDynamicDirectBypassManagerRemovesExistingRouteWhenRemoteFailureProbeFails(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	probe := &fakeDynamicDirectBypassDirectProbe{err: errors.New("direct tls handshake failed")}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, cachePath)
+	manager.directProbe = probe
+	ip := netip.MustParseAddr("104.18.32.47")
+	manager.routes[ip] = dynamicDirectBypassRoute{
+		Host:      "chatgpt.com",
+		IP:        ip.String(),
+		LastSeen:  now.Add(-time.Minute),
+		ExpiresAt: now.Add(time.Hour),
+	}
+	manager.saveCacheLocked()
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "chatgpt.com",
+		IPs:       []netip.Addr{ip},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(probe.calls) != 1 || probe.calls[0].ip != ip {
+		t.Fatalf("expected existing remote-failure route to be re-probed, got %#v", probe.calls)
+	}
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != ip {
+		t.Fatalf("expected failed existing route to be deleted, got %#v", routeManager.deleted)
+	}
+	if len(manager.routes) != 0 {
+		t.Fatalf("expected failed existing route to be removed from memory, got %#v", manager.routes)
+	}
+	if cached := readDynamicDirectBypassCache(t, cachePath); len(cached) != 0 {
+		t.Fatalf("expected failed existing route to be removed from cache, got %#v", cached)
+	}
+}
+
+func TestDynamicDirectBypassManagerRemovesExistingRouteAfterFailedDirectAttempt(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, cachePath)
+	ip := netip.MustParseAddr("172.64.155.209")
+	manager.routes[ip] = dynamicDirectBypassRoute{
+		Host:      "chatgpt.com",
+		IP:        ip.String(),
+		LastSeen:  now.Add(-time.Minute),
+		ExpiresAt: now.Add(time.Hour),
+	}
+	manager.saveCacheLocked()
+
+	manager.cleanupFailedDirectRoutes(context.Background(), []dynamicDirectBypassConnection{
+		{
+			Host:            "chatgpt.com",
+			Destination:     ip,
+			DestinationPort: 443,
+			Network:         "tcp",
+			Outbound:        "direct §hide§",
+			OutboundType:    "direct",
+			Chain:           []string{"direct §hide§"},
+			Upload:          512,
+			Download:        0,
+			CreatedAt:       now,
+			ClosedAt:        now.Add(2 * time.Second),
+		},
+	})
+
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != ip {
+		t.Fatalf("expected failed direct route to be deleted, got %#v", routeManager.deleted)
+	}
+	if len(manager.routes) != 0 {
+		t.Fatalf("expected failed direct route to be removed from memory, got %#v", manager.routes)
+	}
+	if cached := readDynamicDirectBypassCache(t, cachePath); len(cached) != 0 {
+		t.Fatalf("expected failed direct route to be removed from cache, got %#v", cached)
+	}
+}
+
 func TestDynamicDirectBypassManagerBacksOffFailedRemoteProbe(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
@@ -873,6 +998,7 @@ func TestDynamicDirectBypassManagerPersistsProcessMetadata(t *testing.T) {
 			OutboundType: "direct",
 			Chain:        []string{"direct §hide§"},
 			ProcessPath:  `C:\Program Files\Tencent\WeCom\WXWork.exe`,
+			Download:     512,
 		},
 	}, manager.config, nil)
 
@@ -1068,12 +1194,14 @@ func TestDynamicDirectBypassManagerResolvesHotDomainWhenObservedIPIsMissing(t *t
 			Outbound:     "direct §hide§",
 			OutboundType: "direct",
 			Chain:        []string{"direct §hide§"},
+			Download:     512,
 		},
 		{
 			Host:         "cube.weixinbridge.com",
 			Outbound:     "direct §hide§",
 			OutboundType: "direct",
 			Chain:        []string{"direct §hide§"},
+			Download:     512,
 		},
 	}
 
@@ -1234,6 +1362,7 @@ func hotDirectConnection(host string, ip string) dynamicDirectBypassConnection {
 		Outbound:     "direct §hide§",
 		OutboundType: "direct",
 		Chain:        []string{"direct §hide§"},
+		Download:     512,
 	}
 }
 

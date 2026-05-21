@@ -5,7 +5,14 @@ package hcore
 import (
 	"net/netip"
 	"testing"
+	"time"
 )
+
+func TestWindowsDNSCacheDiscoveryTimeoutAllowsSlowPowerShellStartup(t *testing.T) {
+	if windowsDNSCacheDiscoveryTimeout < 15*time.Second {
+		t.Fatalf("expected DNS cache discovery timeout to tolerate slow PowerShell startup, got %s", windowsDNSCacheDiscoveryTimeout)
+	}
+}
 
 func TestWindowsDNSCacheCandidatesFollowCNAMEChainForEagerSuffix(t *testing.T) {
 	entries := []windowsDynamicDirectBypassDNSCacheEntry{

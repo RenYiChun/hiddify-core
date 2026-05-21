@@ -285,6 +285,29 @@ func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
 	options.Custom = &custom
 }
 
+func effectiveDomainStrategyForIPv6Mode(configured option.DomainStrategy, hopt *HiddifyOptions) option.DomainStrategy {
+	if hopt != nil &&
+		hopt.IPv6Mode == option.DomainStrategy(C.DomainStrategyIPv4Only) &&
+		configured == option.DomainStrategy(C.DomainStrategyAsIS) {
+		return option.DomainStrategy(C.DomainStrategyIPv4Only)
+	}
+	return configured
+}
+
+func effectiveDirectDNSDomainStrategy(hopt *HiddifyOptions) option.DomainStrategy {
+	if hopt == nil {
+		return option.DomainStrategy(C.DomainStrategyAsIS)
+	}
+	return effectiveDomainStrategyForIPv6Mode(hopt.DirectDnsDomainStrategy, hopt)
+}
+
+func effectiveRemoteDNSDomainStrategy(hopt *HiddifyOptions) option.DomainStrategy {
+	if hopt == nil {
+		return option.DomainStrategy(C.DomainStrategyAsIS)
+	}
+	return effectiveDomainStrategyForIPv6Mode(hopt.RemoteDnsDomainStrategy, hopt)
+}
+
 func normalizeRouteConnectionLimit(limit int, defaultLimit int) int {
 	if limit < 1 {
 		return defaultLimit
@@ -616,6 +639,7 @@ func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 				Workers:        3,
 				DebounceWindow: badoption.Duration(time.Millisecond * 500),
 				IdleTimeout:    badoption.Duration(hopt.URLTestInterval.Duration().Nanoseconds() * 3),
+				URLTestLogFile: "data/url-test.log",
 			},
 		}
 	}
@@ -682,7 +706,7 @@ func appendDirectDNSRulesWithTerminalFallback(
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
 					Server:         server,
-					Strategy:       hopt.DirectDnsDomainStrategy,
+					Strategy:       effectiveDirectDNSDomainStrategy(hopt),
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 					BypassIfFailed: bypassIfFailed,
 				},
@@ -690,6 +714,24 @@ func appendDirectDNSRulesWithTerminalFallback(
 		})
 	}
 	return dnsRules
+}
+
+func appendLocalReverseDNSRules(dnsRules []option.DefaultDNSRule) []option.DefaultDNSRule {
+	return append(dnsRules, option.DefaultDNSRule{
+		RawDefaultDNSRule: option.RawDefaultDNSRule{
+			Domain: []string{
+				"1.0.0.127.in-addr.arpa",
+				"1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+			},
+		},
+		DNSRuleAction: option.DNSRuleAction{
+			Action: C.RuleActionTypeRoute,
+			RouteOptions: option.DNSRouteActionOptions{
+				Server:         DNSLocalTag,
+				BypassIfFailed: false,
+			},
+		},
+	})
 }
 
 var defaultDirectDomainSuffixRules = []string{
@@ -939,6 +981,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 	}
 
 	dnsRules = append(dnsRules, forceDirectRules...)
+	dnsRules = appendLocalReverseDNSRules(dnsRules)
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
@@ -959,6 +1002,22 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		},
 	})
+	if hopt.IPv6Mode == option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		routeRules = append(routeRules, option.Rule{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultRule{
+				RawDefaultRule: option.RawDefaultRule{
+					IPVersion: 6,
+				},
+				RuleAction: option.RuleAction{
+					Action: C.RuleActionTypeReject,
+					RejectOptions: option.RejectActionOptions{
+						Method: C.RuleActionRejectMethodDefault,
+					},
+				},
+			},
+		})
+	}
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
@@ -1013,7 +1072,10 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		)
 	}
 
-	routeRules = appendDynamicDirectBypassRouteRules(routeRules, hopt)
+	dynamicDirectBypassMatchers := loadDynamicDirectBypassRouteMatchers(hopt, time.Now())
+	routeRules = appendDynamicDirectBypassCIDRRouteRules(routeRules, dynamicDirectBypassMatchers)
+	routeRules = appendTunSniffOverrideDestinationRule(routeRules, hopt)
+	routeRules = appendDynamicDirectBypassDomainRouteRules(routeRules, dynamicDirectBypassMatchers)
 
 	// for _, rule := range opt.Rules {
 	// 	routeRule := rule.MakeRule()
@@ -1279,7 +1341,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		AutoDetectInterface: (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService),
 		DefaultDomainResolver: &option.DomainResolveOptions{
 			Server:   defaultDomainResolverServer(hopt),
-			Strategy: hopt.DirectDnsDomainStrategy,
+			Strategy: effectiveDirectDNSDomainStrategy(hopt),
 		},
 		// OverrideAndroidVPN: hopt.EnableTun && C.IsAndroid,
 		RuleSet:     rulesets,
@@ -1313,7 +1375,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 					Action: C.RuleActionTypeRoute,
 					RouteOptions: option.DNSRouteActionOptions{
 						Server:         DNSFakeTag,
-						Strategy:       hopt.RemoteDnsDomainStrategy,
+						Strategy:       effectiveRemoteDNSDomainStrategy(hopt),
 						RewriteTTL:     &DEFAULT_DNS_TTL,
 						DisableCache:   true,
 						BypassIfFailed: false,
@@ -1329,7 +1391,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			Action: C.RuleActionTypeRoute,
 			RouteOptions: option.DNSRouteActionOptions{
 				Server:         DNSMultiRemoteTag,
-				Strategy:       hopt.RemoteDnsDomainStrategy,
+				Strategy:       effectiveRemoteDNSDomainStrategy(hopt),
 				RewriteTTL:     &DEFAULT_DNS_TTL,
 				BypassIfFailed: false,
 			},
@@ -1445,8 +1507,7 @@ type dynamicDirectBypassRouteCacheEntry struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
-func appendDynamicDirectBypassRouteRules(routeRules []option.Rule, hopt *HiddifyOptions) []option.Rule {
-	matchers := loadDynamicDirectBypassRouteMatchers(hopt, time.Now())
+func appendDynamicDirectBypassDomainRouteRules(routeRules []option.Rule, matchers dynamicDirectBypassRouteMatchers) []option.Rule {
 	if len(matchers.domains) == 0 && len(matchers.cidrs) == 0 {
 		return routeRules
 	}
@@ -1466,6 +1527,10 @@ func appendDynamicDirectBypassRouteRules(routeRules []option.Rule, hopt *Hiddify
 			},
 		})
 	}
+	return routeRules
+}
+
+func appendDynamicDirectBypassCIDRRouteRules(routeRules []option.Rule, matchers dynamicDirectBypassRouteMatchers) []option.Rule {
 	if len(matchers.cidrs) > 0 {
 		routeRules = append(routeRules, option.Rule{
 			Type: C.RuleTypeDefault,
@@ -1483,6 +1548,26 @@ func appendDynamicDirectBypassRouteRules(routeRules []option.Rule, hopt *Hiddify
 		})
 	}
 	return routeRules
+}
+
+func appendTunSniffOverrideDestinationRule(routeRules []option.Rule, hopt *HiddifyOptions) []option.Rule {
+	if hopt == nil || (!hopt.EnableTun && !hopt.EnableTunService) {
+		return routeRules
+	}
+	return append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				Inbound: []string{InboundTUNTag},
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeSniff,
+				SniffOptions: option.RouteActionSniff{
+					OverrideDestination: true,
+				},
+			},
+		},
+	})
 }
 
 type dynamicDirectBypassRouteMatchers struct {

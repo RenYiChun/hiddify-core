@@ -38,6 +38,250 @@ func TestSetRoutingOptionsUsesLocalBootstrapResolverForTun(t *testing.T) {
 	}
 }
 
+func TestSetRoutingOptionsRoutesLoopbackReverseDNSToLocal(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	localIndex := -1
+	remoteIndex := -1
+	for index, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if containsString(defaultRule.Domain, "1.0.0.127.in-addr.arpa") {
+			localIndex = index
+			if defaultRule.RouteOptions.Server != DNSLocalTag {
+				t.Fatalf("expected loopback reverse DNS to use %q, got %q", DNSLocalTag, defaultRule.RouteOptions.Server)
+			}
+			if defaultRule.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected loopback reverse DNS not to fall through: %+v", defaultRule)
+			}
+		}
+		if defaultRule.RouteOptions.Server == DNSMultiRemoteTag {
+			remoteIndex = index
+		}
+	}
+	if localIndex == -1 {
+		t.Fatal("expected loopback reverse DNS rule")
+	}
+	if remoteIndex == -1 {
+		t.Fatal("expected final remote DNS rule")
+	}
+	if localIndex > remoteIndex {
+		t.Fatalf("expected loopback reverse DNS before final remote DNS, got %d and %d", localIndex, remoteIndex)
+	}
+}
+
+func TestSetRoutingOptionsRejectsIPv6DestinationsWhenIPv4Only(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			IPv6Mode:  option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hijackDNSIndex := -1
+	ipv6RejectIndex := -1
+	for index, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.Action == C.RuleActionTypeHijackDNS {
+			hijackDNSIndex = index
+		}
+		if defaultRule.IPVersion == 6 && defaultRule.Action == C.RuleActionTypeReject {
+			ipv6RejectIndex = index
+			if defaultRule.RejectOptions.Method != C.RuleActionRejectMethodDefault {
+				t.Fatalf("expected default reject method, got %q", defaultRule.RejectOptions.Method)
+			}
+		}
+	}
+	if hijackDNSIndex == -1 {
+		t.Fatal("expected DNS hijack rule")
+	}
+	if ipv6RejectIndex == -1 {
+		t.Fatal("expected IPv6 reject route rule")
+	}
+	if hijackDNSIndex > ipv6RejectIndex {
+		t.Fatalf("expected DNS hijack before IPv6 reject, got %d and %d", hijackDNSIndex, ipv6RejectIndex)
+	}
+}
+
+func TestSetRoutingOptionsUsesIPv4OnlyRemoteDNSWhenIPv6Disabled(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			RemoteDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			IPv6Mode:  option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.RouteOptions.Server != DNSMultiRemoteTag {
+			continue
+		}
+		if defaultRule.RouteOptions.Strategy != option.DomainStrategy(dns.DomainStrategyUseIPv4) {
+			t.Fatalf("expected final remote DNS strategy to be IPv4-only, got %s", defaultRule.RouteOptions.Strategy)
+		}
+		return
+	}
+	t.Fatal("expected final remote DNS rule")
+}
+
+func TestSetRoutingOptionsKeepsIPv6DestinationsWhenIPv6ModeIsNotIPv4Only(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			IPv6Mode:  option.DomainStrategy(dns.DomainStrategyAsIS),
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.IPVersion == 6 && defaultRule.Action == C.RuleActionTypeReject {
+			t.Fatalf("expected no IPv6 reject rule outside IPv4-only mode, got %+v", defaultRule)
+		}
+	}
+}
+
+func TestSetRoutingOptionsAddsTunSniffOverrideAfterPrivateBypass(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "direct-domain-suffixes.txt")
+	if err := os.WriteFile(path, []byte("custom.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN:                   true,
+			DirectDomainSuffixRulesPath: path,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	privateBypassIndex := -1
+	overrideIndex := -1
+	domainDirectIndex := -1
+	for index, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.IPIsPrivate && defaultRule.RouteOptions.Outbound == OutboundDirectTag {
+			privateBypassIndex = index
+		}
+		if defaultRule.Action == C.RuleActionTypeSniff &&
+			containsString(defaultRule.Inbound, InboundTUNTag) &&
+			defaultRule.SniffOptions.OverrideDestination {
+			overrideIndex = index
+		}
+		if containsString(defaultRule.DomainSuffix, "custom.example.com") &&
+			defaultRule.RouteOptions.Outbound == OutboundDirectTag {
+			domainDirectIndex = index
+		}
+	}
+	if privateBypassIndex == -1 {
+		t.Fatal("expected private bypass route rule")
+	}
+	if overrideIndex == -1 {
+		t.Fatal("expected TUN sniff override route rule")
+	}
+	if domainDirectIndex == -1 {
+		t.Fatal("expected domain direct route rule")
+	}
+	if !(privateBypassIndex < overrideIndex && overrideIndex < domainDirectIndex) {
+		t.Fatalf("expected private bypass < TUN sniff override < domain direct, got %d, %d, %d", privateBypassIndex, overrideIndex, domainDirectIndex)
+	}
+}
+
+func TestSetRoutingOptionsDoesNotAddTunSniffOverrideOutsideTun(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			SetSystemProxy: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.Action == C.RuleActionTypeSniff &&
+			defaultRule.SniffOptions.OverrideDestination {
+			t.Fatalf("expected no sniff override outside TUN, got %+v", defaultRule)
+		}
+	}
+}
+
 func TestSetRoutingOptionsAddsDynamicDirectBypassIPRules(t *testing.T) {
 	options := option.Options{
 		DNS: &option.DNSOptions{},

@@ -6,6 +6,7 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	dns "github.com/sagernet/sing-dns"
 )
 
 func TestSetOutboundsDefaultsSelectorToLowestDelay(t *testing.T) {
@@ -156,6 +157,42 @@ func TestSetOutboundsAddsDirectConnectTimeouts(t *testing.T) {
 		if !found[tag] {
 			t.Fatalf("expected %q outbound to be generated", tag)
 		}
+	}
+}
+
+func TestPatchOutboundForcesIPv4DomainStrategyWhenIPv6Disabled(t *testing.T) {
+	staticIPs := map[string][]string{}
+	patched, err := patchOutbound(
+		option.Outbound{
+			Type: C.TypeNaive,
+			Tag:  "naive",
+			Options: &option.NaiveOutboundOptions{
+				ServerOptions: option.ServerOptions{
+					Server:     "proxy.example.com",
+					ServerPort: 443,
+				},
+				OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+					TLS: &option.OutboundTLSOptions{Enabled: true},
+				},
+			},
+		},
+		HiddifyOptions{
+			RouteOptions: RouteOptions{
+				IPv6Mode: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			},
+		},
+		&staticIPs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dialer, ok := patched.Options.(option.DialerOptionsWrapper)
+	if !ok {
+		t.Fatalf("expected patched outbound to expose dialer options, got %T", patched.Options)
+	}
+	if got := dialer.TakeDialerOptions().DomainStrategy; got != option.DomainStrategy(dns.DomainStrategyUseIPv4) {
+		t.Fatalf("expected outbound domain strategy to be IPv4-only, got %s", got)
 	}
 }
 
