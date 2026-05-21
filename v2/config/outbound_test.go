@@ -85,7 +85,7 @@ func TestSetOutboundsDefaultsBalanceStrategy(t *testing.T) {
 	t.Fatal("expected balance outbound to be generated")
 }
 
-func TestSetOutboundsGeneratedBalancersDoNotInterruptExistingConnections(t *testing.T) {
+func TestSetOutboundsGeneratedOutboundsDoNotInterruptExistingConnections(t *testing.T) {
 	var options option.Options
 	staticIPs := map[string][]string{}
 	input := &option.Options{
@@ -119,6 +119,18 @@ func TestSetOutboundsGeneratedBalancersDoNotInterruptExistingConnections(t *test
 		if balancerOptions.InterruptExistConnections {
 			t.Fatalf("expected generated balancer %q not to interrupt existing connections", tag)
 		}
+	}
+
+	selector := findTestOutbound(options.Outbounds, OutboundSelectTag)
+	if selector == nil {
+		t.Fatalf("expected %q outbound to be generated", OutboundSelectTag)
+	}
+	selectorOptions, ok := selector.Options.(*option.SelectorOutboundOptions)
+	if !ok {
+		t.Fatalf("expected selector options for %q, got %T", OutboundSelectTag, selector.Options)
+	}
+	if selectorOptions.InterruptExistConnections {
+		t.Fatalf("expected generated selector %q not to interrupt existing connections", OutboundSelectTag)
 	}
 }
 

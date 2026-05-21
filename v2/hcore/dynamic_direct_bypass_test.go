@@ -117,6 +117,26 @@ func TestDynamicDirectBypassModeForOptionsIncludesMixedInbound(t *testing.T) {
 	}
 }
 
+func TestDynamicDirectBypassRouteRuleReloadNeededOnlyForRuleCacheMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode dynamicDirectBypassStartMode
+		want bool
+	}{
+		{name: "system route updates Windows routes directly", mode: dynamicDirectBypassModeSystemRoute, want: false},
+		{name: "rule cache requires generated route rules to be reloaded", mode: dynamicDirectBypassModeRuleCacheOnly, want: true},
+		{name: "disabled mode does not reload", mode: dynamicDirectBypassModeDisabled, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dynamicDirectBypassRouteRuleReloadNeeded(tt.mode); got != tt.want {
+				t.Fatalf("expected reload needed=%v for mode %s, got %v", tt.want, tt.mode, got)
+			}
+		})
+	}
+}
+
 func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
@@ -620,6 +640,54 @@ func TestScheduleDynamicDirectBypassRouteReloadWaitsForIdleConnections(t *testin
 	case <-reloaded:
 		t.Fatal("expected route-rule reload to wait while active connections exist")
 	case <-time.After(40 * time.Millisecond):
+	}
+
+	atomic.StoreInt32(&activeConnections, 0)
+	select {
+	case <-reloaded:
+	case <-time.After(time.Second):
+		t.Fatal("expected pending route-rule reload after active connections drain")
+	}
+}
+
+func TestScheduleDynamicDirectBypassRouteReloadDoesNotForceWhenMaxWaitDisabled(t *testing.T) {
+	previousDelay := dynamicDirectBypassRouteReloadDelay
+	previousIdleDelay := dynamicDirectBypassRouteReloadIdleCheckInterval
+	previousMaxWait := dynamicDirectBypassRouteReloadMaxWait
+	previousReload := dynamicDirectBypassRouteReloadFunc
+	previousActiveConnections := dynamicDirectBypassRouteReloadActiveConnections
+	dynamicDirectBypassRouteReloadDelay = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadIdleCheckInterval = 10 * time.Millisecond
+	dynamicDirectBypassRouteReloadMaxWait = 0
+	var activeConnections int32 = 1
+	reloaded := make(chan struct{}, 1)
+	dynamicDirectBypassRouteReloadFunc = func(context.Context) {
+		reloaded <- struct{}{}
+	}
+	dynamicDirectBypassRouteReloadActiveConnections = func() int {
+		return int(atomic.LoadInt32(&activeConnections))
+	}
+	t.Cleanup(func() {
+		dynamicDirectBypassRouteReloadMu.Lock()
+		if dynamicDirectBypassRouteReloadTimer != nil {
+			dynamicDirectBypassRouteReloadTimer.Stop()
+			dynamicDirectBypassRouteReloadTimer = nil
+		}
+		dynamicDirectBypassRouteReloadPendingSince = time.Time{}
+		dynamicDirectBypassRouteReloadMu.Unlock()
+		dynamicDirectBypassRouteReloadDelay = previousDelay
+		dynamicDirectBypassRouteReloadIdleCheckInterval = previousIdleDelay
+		dynamicDirectBypassRouteReloadMaxWait = previousMaxWait
+		dynamicDirectBypassRouteReloadFunc = previousReload
+		dynamicDirectBypassRouteReloadActiveConnections = previousActiveConnections
+	})
+
+	scheduleDynamicDirectBypassRouteReload()
+
+	select {
+	case <-reloaded:
+		t.Fatal("expected disabled max wait not to force reload while active connections exist")
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	atomic.StoreInt32(&activeConnections, 0)

@@ -16,7 +16,7 @@ import (
 var (
 	dynamicDirectBypassRouteReloadDelay             = 2 * time.Second
 	dynamicDirectBypassRouteReloadIdleCheckInterval = 5 * time.Second
-	dynamicDirectBypassRouteReloadMaxWait           = 10 * time.Second
+	dynamicDirectBypassRouteReloadMaxWait           time.Duration
 	dynamicDirectBypassRouteReloadMu                sync.Mutex
 	dynamicDirectBypassRouteReloadTimer             *time.Timer
 	dynamicDirectBypassRouteReloadPendingSince      time.Time
@@ -87,7 +87,11 @@ func startDynamicDirectBypassIfNeeded(options option.Options) {
 		dnsCache,
 		filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"),
 	)
-	manager.onRoutesChanged = scheduleDynamicDirectBypassRouteReload
+	if dynamicDirectBypassRouteRuleReloadNeeded(mode) {
+		manager.onRoutesChanged = scheduleDynamicDirectBypassRouteReload
+	} else {
+		Log(LogLevel_INFO, LogType_CORE, "dynamic direct bypass route-rule reload disabled for mode=", mode)
+	}
 	static.dynamicDirectBypassCancel = cancel
 	static.dynamicDirectBypass = manager
 	stageStartedAt := time.Now()
@@ -161,7 +165,8 @@ func runScheduledDynamicDirectBypassRouteReload() {
 	now := time.Now()
 	activeConnections := dynamicDirectBypassRouteReloadActiveConnections()
 	dynamicDirectBypassRouteReloadMu.Lock()
-	forceReload := !dynamicDirectBypassRouteReloadPendingSince.IsZero() &&
+	forceReload := dynamicDirectBypassRouteReloadMaxWait > 0 &&
+		!dynamicDirectBypassRouteReloadPendingSince.IsZero() &&
 		now.Sub(dynamicDirectBypassRouteReloadPendingSince) >= dynamicDirectBypassRouteReloadMaxWait
 	if activeConnections > 0 {
 		if forceReload {
@@ -277,6 +282,10 @@ func dynamicDirectBypassModeForOptions(options option.Options) dynamicDirectBypa
 		return dynamicDirectBypassModeRuleCacheOnly
 	}
 	return dynamicDirectBypassModeDisabled
+}
+
+func dynamicDirectBypassRouteRuleReloadNeeded(mode dynamicDirectBypassStartMode) bool {
+	return mode == dynamicDirectBypassModeRuleCacheOnly
 }
 
 func hasMixedInbound(options option.Options) bool {

@@ -529,7 +529,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		Options: &option.SelectorOutboundOptions{
 			Outbounds:                 selectorTags,
 			Default:                   defaultSelect,
-			InterruptExistConnections: true,
+			InterruptExistConnections: false,
 		},
 	}
 	outbounds = append([]option.Outbound{selector}, outbounds...)
