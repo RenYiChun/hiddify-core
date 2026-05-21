@@ -5,6 +5,7 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	dns "github.com/sagernet/sing-dns"
 )
 
 func TestSetDnsLeavesDirectIPDoHOnDefaultDirectDialer(t *testing.T) {
@@ -73,6 +74,43 @@ func TestSetDnsUsesDoHFallbackForRemoteNoWarpWhenTunRemoteDNSIsPlainTcpIP(t *tes
 	}
 }
 
+func TestSetDnsForcesDNSServerDialerResolutionToIPv4WhenIPv6Disabled(t *testing.T) {
+	var options option.Options
+	staticIPs := map[string][]string{}
+	err := setDns(
+		&options,
+		&HiddifyOptions{
+			DNSOptions: DNSOptions{
+				RemoteDnsAddress: "https://dns.google/dns-query",
+				DirectDnsAddress: "https://dns.alidns.com/dns-query",
+			},
+			InboundOptions: InboundOptions{
+				EnableTun: true,
+			},
+			RouteOptions: RouteOptions{
+				IPv6Mode: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			},
+		},
+		&staticIPs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tag := range []string{DNSRemoteTag, DNSRemoteTagFallback, DNSTricksDirectTag, DNSDirectTag, DNSRemoteNoWarpTag} {
+		server := findTestDNSServer(t, options.DNS.Servers, tag)
+		dialer := takeTestDNSServerDialerOptions(t, server)
+		if got := dialer.DomainStrategy; got != option.DomainStrategy(dns.DomainStrategyUseIPv4) {
+			t.Fatalf("expected DNS server %q dialer strategy to be IPv4-only, got %s", tag, got)
+		}
+		if dialer.DomainResolver != nil && dialer.DomainResolver.Server != "" {
+			if got := dialer.DomainResolver.Strategy; got != option.DomainStrategy(dns.DomainStrategyUseIPv4) {
+				t.Fatalf("expected DNS server %q dialer resolver strategy to be IPv4-only, got %s", tag, got)
+			}
+		}
+	}
+}
+
 func TestAddForceDirectRoutesOutboundServerDomainsThroughDirectDNS(t *testing.T) {
 	options := option.Options{
 		Outbounds: []option.Outbound{
@@ -122,6 +160,34 @@ func TestAddForceDirectRoutesOutboundServerDomainsThroughDirectDNS(t *testing.T)
 		}
 	}
 	assertDNSRuleServers(t, matchedServers, []string{DNSMultiDirectTag})
+}
+
+func findTestDNSServer(t *testing.T, servers []option.DNSServerOptions, tag string) option.DNSServerOptions {
+	t.Helper()
+	for _, server := range servers {
+		if server.Tag == tag {
+			return server
+		}
+	}
+	t.Fatalf("expected DNS server %q to be generated", tag)
+	return option.DNSServerOptions{}
+}
+
+func takeTestDNSServerDialerOptions(t *testing.T, server option.DNSServerOptions) option.DialerOptions {
+	t.Helper()
+	switch options := server.Options.(type) {
+	case *option.RemoteDNSServerOptions:
+		return options.DialerOptions
+	case *option.RemoteTLSDNSServerOptions:
+		return options.DialerOptions
+	case *option.RemoteHTTPSDNSServerOptions:
+		return options.DialerOptions
+	case *option.LocalDNSServerOptions:
+		return options.DialerOptions
+	default:
+		t.Fatalf("unexpected DNS server options for %q: %T", server.Tag, server.Options)
+		return option.DialerOptions{}
+	}
 }
 
 func buildDirectDNSServer(t *testing.T, directDNSAddress string) option.DNSServerOptions {

@@ -51,15 +51,16 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	// 	remoteAddr = strings.Replace(remoteAddr, "udp://", "tcp://", 1)
 	// }
 
-	remote_dns, err := getDNSServerOptions(DNSRemoteTag, remoteAddr, DNSDirectTag, OutboundMainDetour)
+	dnsServerDialerStrategy := dnsServerDialerDomainStrategy(opt)
+	remote_dns, err := getDNSServerOptions(DNSRemoteTag, remoteAddr, DNSDirectTag, OutboundMainDetour, dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
-	remote_dns_fallback, err := getDNSServerOptions(DNSRemoteTagFallback, fallbackAddr, DNSDirectTag, OutboundMainDetour)
+	remote_dns_fallback, err := getDNSServerOptions(DNSRemoteTagFallback, fallbackAddr, DNSDirectTag, OutboundMainDetour, dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
-	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, remoteNoWarpAddr, DNSDirectTag, OutboundWARPConfigDetour)
+	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, remoteNoWarpAddr, DNSDirectTag, OutboundWARPConfigDetour, dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
@@ -70,15 +71,15 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 		direct_detour = ""
 	}
 
-	direct_dns, err := getDNSServerOptions(DNSDirectTag, directAddr, DNSLocalTag, direct_detour)
+	direct_dns, err := getDNSServerOptions(DNSDirectTag, directAddr, DNSLocalTag, direct_detour, dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
-	trick_dns, err := getDNSServerOptions(DNSTricksDirectTag, "https://dns.cloudflare.com/dns-query#fragment=300", DNSDirectTag, OutboundDirectFragmentTag)
+	trick_dns, err := getDNSServerOptions(DNSTricksDirectTag, "https://dns.cloudflare.com/dns-query#fragment=300", DNSDirectTag, OutboundDirectFragmentTag, dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
-	local_dns, err := getDNSServerOptions(DNSLocalTag, "local", "", "")
+	local_dns, err := getDNSServerOptions(DNSLocalTag, "local", "", "", dnsServerDialerStrategy)
 	if err != nil {
 		return err
 	}
@@ -155,6 +156,13 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 func isDNSAddressIPLiteral(dnsAddress string) bool {
 	host, _ := getHostnameIfNotIP(dnsAddress)
 	return host == ""
+}
+
+func dnsServerDialerDomainStrategy(hopt *HiddifyOptions) option.DomainStrategy {
+	if hopt != nil && hopt.IPv6Mode == option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		return option.DomainStrategy(C.DomainStrategyIPv4Only)
+	}
+	return option.DomainStrategy(C.DomainStrategyPreferIPv4)
 }
 
 func avoidPlainTCPIPDNS(dnsAddress string, fallbackAddress string) string {
@@ -362,7 +370,13 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 
 }
 
-func getDNSServerOptions(tag string, dnsurl string, domain_resolver string, detour string) (*option.DNSServerOptions, error) {
+func getDNSServerOptions(
+	tag string,
+	dnsurl string,
+	domain_resolver string,
+	detour string,
+	domainResolverStrategy option.DomainStrategy,
+) (*option.DNSServerOptions, error) {
 	serverURL, _ := url.Parse(dnsurl)
 	var serverType string
 	if serverURL != nil && serverURL.Scheme != "" {
@@ -384,10 +398,13 @@ func getDNSServerOptions(tag string, dnsurl string, domain_resolver string, deto
 				Detour: detour,
 				DomainResolver: &option.DomainResolveOptions{
 					Server:   domain_resolver,
-					Strategy: option.DomainStrategy(C.DomainStrategyPreferIPv4),
+					Strategy: domainResolverStrategy,
 				},
 			},
 		},
+	}
+	if domainResolverStrategy == option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		remoteOptions.DomainStrategy = domainResolverStrategy
 	}
 	o := option.DNSServerOptions{
 		Tag: tag,
