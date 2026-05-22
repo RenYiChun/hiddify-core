@@ -747,6 +747,9 @@ var defaultDirectDomainSuffixRules = []string{
 	"gtimg.com",
 	"myqcloud.com",
 	"qcloud.com",
+	"aliyun.com",
+	"aliyuncs.com",
+	"alicdn.com",
 	"huaweicloud.com",
 	"myhuaweicloud.com",
 	"huaweicloudapis.com",
@@ -1018,6 +1021,13 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 	}
+
+	var customRouteRulesErr error
+	dnsRules, routeRules, customRouteRulesErr = appendCustomRouteRules(dnsRules, routeRules, hopt)
+	if customRouteRulesErr != nil {
+		return customRouteRulesErr
+	}
+	routeRules = appendProcessDirectRouteRules(routeRules, hopt)
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,

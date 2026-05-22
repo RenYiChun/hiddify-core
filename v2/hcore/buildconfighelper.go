@@ -40,6 +40,7 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 		// Log(LogLevel_DEBUG, LogType_CORE, "Building config ")
 		applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 		applyLocalDynamicDirectBypassRoutesPath(static.HiddifyOptions)
+		applyLocalRouteRulesPath(static.HiddifyOptions)
 		return config.BuildConfig(ctx, static.HiddifyOptions, readOpt)
 	}
 	return config.ReadSingOptions(ctx, readOpt)
@@ -63,6 +64,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 
 	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 	applyLocalDynamicDirectBypassRoutesPath(static.HiddifyOptions)
+	applyLocalRouteRulesPath(static.HiddifyOptions)
 	config, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: in.Content, Path: path}, true, static.HiddifyOptions, false)
 	if err != nil {
 		return &ParseResponse{
@@ -129,6 +131,7 @@ func ChangeHiddifySettings(in *ChangeHiddifySettingsRequest, insert bool) (*Core
 	}
 	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 	applyLocalDynamicDirectBypassRoutesPath(static.HiddifyOptions)
+	applyLocalRouteRulesPath(static.HiddifyOptions)
 
 	if static.HiddifyOptions.Warp.WireguardConfigStr != "" {
 		err := json.Unmarshal([]byte(static.HiddifyOptions.Warp.WireguardConfigStr), &static.HiddifyOptions.Warp.WireguardConfig)
@@ -159,6 +162,7 @@ func GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateCo
 	}
 	applyLocalDirectDomainSuffixRulesPath(static.HiddifyOptions)
 	applyLocalDynamicDirectBypassRoutesPath(static.HiddifyOptions)
+	applyLocalRouteRulesPath(static.HiddifyOptions)
 	config, err := config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: in.Path})
 	if err != nil {
 		return nil, err
@@ -181,6 +185,13 @@ func applyLocalDynamicDirectBypassRoutesPath(hopt *config.HiddifyOptions) {
 		return
 	}
 	hopt.DynamicDirectBypassRoutesPath = filepath.Clean(filepath.Join(sWorkingPath, "data", "dynamic-direct-bypass-routes.json"))
+}
+
+func applyLocalRouteRulesPath(hopt *config.HiddifyOptions) {
+	if hopt == nil || hopt.RouteRulesPath != "" || sWorkingPath == "" {
+		return
+	}
+	hopt.RouteRulesPath = filepath.Clean(config.DefaultRouteRulesPath(sWorkingPath))
 }
 
 func removeTunnelIfNeeded(options *option.Options) (tuninb *option.TunInboundOptions) {

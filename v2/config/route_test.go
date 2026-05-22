@@ -726,6 +726,9 @@ func TestDefaultDirectDomainSuffixRulesIncludeCloudLoginDependencies(t *testing.
 	suffixes := DefaultDirectDomainSuffixRules()
 
 	for _, expected := range []string{
+		"aliyun.com",
+		"aliyuncs.com",
+		"alicdn.com",
 		"huaweicloud.com",
 		"myhuaweicloud.com",
 		"huaweicloudapis.com",
@@ -742,6 +745,47 @@ func TestDefaultDirectDomainSuffixRulesIncludeCloudLoginDependencies(t *testing.
 		if !containsString(suffixes, expected) {
 			t.Fatalf("expected default direct suffix rules to include %q, got %#v", expected, suffixes)
 		}
+	}
+}
+
+func TestLoadDirectDomainSuffixRulesFileMigratesGeneratedDefaultFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules", "direct-domain-suffixes.txt")
+	oldGeneratedContent := `# Hiddify direct domain suffix rules
+# One domain suffix per line. Blank lines and lines beginning with # are ignored.
+# Matching domains use direct DNS and direct route when the generated config starts.
+
+work.weixin.qq.com
+weixin.qq.com
+`
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(oldGeneratedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	suffixes, err := LoadDirectDomainSuffixRulesFile(path, []string{
+		"work.weixin.qq.com",
+		"weixin.qq.com",
+		"aliyun.com",
+		"aliyuncs.com",
+		"alicdn.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"aliyun.com", "aliyuncs.com", "alicdn.com"} {
+		if !containsString(suffixes, expected) {
+			t.Fatalf("expected migrated generated file to include %q, got %#v", expected, suffixes)
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := ParseDirectDomainSuffixRules(string(content))
+	if !containsString(parsed, "aliyun.com") {
+		t.Fatalf("expected generated file to be updated with new defaults, got:\n%s", string(content))
 	}
 }
 

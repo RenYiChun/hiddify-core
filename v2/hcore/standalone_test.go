@@ -121,3 +121,35 @@ func TestApplyLocalDynamicDirectBypassRoutesPathKeepsExplicitPath(t *testing.T) 
 		t.Fatalf("expected explicit dynamic direct bypass routes path to be preserved, got %q", hopts.DynamicDirectBypassRoutesPath)
 	}
 }
+
+func TestApplyLocalRouteRulesPathUsesWorkingPath(t *testing.T) {
+	previousWorkingPath := sWorkingPath
+	sWorkingPath = t.TempDir()
+	t.Cleanup(func() {
+		sWorkingPath = previousWorkingPath
+	})
+
+	hopts := config.DefaultHiddifyOptions()
+	applyLocalRouteRulesPath(hopts)
+
+	expected := filepath.Clean(config.DefaultRouteRulesPath(sWorkingPath))
+	if hopts.RouteRulesPath != expected {
+		t.Fatalf("expected route rules path %q, got %q", expected, hopts.RouteRulesPath)
+	}
+}
+
+func TestApplyLocalRouteRulesPathKeepsExplicitPath(t *testing.T) {
+	previousWorkingPath := sWorkingPath
+	sWorkingPath = t.TempDir()
+	t.Cleanup(func() {
+		sWorkingPath = previousWorkingPath
+	})
+
+	hopts := config.DefaultHiddifyOptions()
+	hopts.RouteRulesPath = filepath.Join(t.TempDir(), "custom-route-rules.pb")
+	applyLocalRouteRulesPath(hopts)
+
+	if filepath.Base(hopts.RouteRulesPath) != "custom-route-rules.pb" {
+		t.Fatalf("expected explicit route rules path to be preserved, got %q", hopts.RouteRulesPath)
+	}
+}

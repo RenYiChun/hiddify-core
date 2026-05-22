@@ -137,6 +137,18 @@ func TestDynamicDirectBypassRouteRuleReloadNeededOnlyForRuleCacheMode(t *testing
 	}
 }
 
+func TestDynamicDirectBypassExpectedFailuresUseQuietLogLevels(t *testing.T) {
+	if got := dynamicDirectBypassRemoteProbeFailureLogLevel(false); got != LogLevel_DEBUG {
+		t.Fatalf("expected failed probe without kept route to be debug, got %s", got)
+	}
+	if got := dynamicDirectBypassRemoteProbeFailureLogLevel(true); got != LogLevel_INFO {
+		t.Fatalf("expected failed probe that removes a kept route to be info, got %s", got)
+	}
+	if got := dynamicDirectBypassOptionalLookupFailureLogLevel(); got != LogLevel_DEBUG {
+		t.Fatalf("expected optional DNS cache lookup failures to be debug, got %s", got)
+	}
+}
+
 func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
@@ -1333,6 +1345,47 @@ func TestDynamicDirectBypassManagerResolvesObservedEagerHost(t *testing.T) {
 		!containsAddr(routeManager.added, netip.MustParseAddr("183.60.116.3")) ||
 		!containsAddr(routeManager.added, netip.MustParseAddr("183.60.116.4")) {
 		t.Fatalf("expected eager host to include resolved IPs, got %#v", routeManager.added)
+	}
+}
+
+func TestDynamicDirectBypassManagerPrefersResolvedIPsForRemoteFailures(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	probe := &fakeDynamicDirectBypassDirectProbe{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, fakeDynamicDirectBypassResolver{
+		"www.aliyun.com": {
+			netip.MustParseAddr("183.61.14.229"),
+			netip.MustParseAddr("59.36.214.139"),
+		},
+	}, nil, "")
+	manager.directProbe = probe
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "www.aliyun.com",
+		IPs:       []netip.Addr{netip.MustParseAddr("47.88.198.68")},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if containsAddr(routeManager.added, netip.MustParseAddr("47.88.198.68")) {
+		t.Fatalf("expected remote-failure fallback to avoid observed remote-DNS IPs, got %#v", routeManager.added)
+	}
+	for _, expected := range []netip.Addr{
+		netip.MustParseAddr("183.61.14.229"),
+		netip.MustParseAddr("59.36.214.139"),
+	} {
+		if !containsAddr(routeManager.added, expected) {
+			t.Fatalf("expected direct-resolved IP %s to be probed and routed, got %#v", expected, routeManager.added)
+		}
+	}
+	if len(probe.calls) != 2 {
+		t.Fatalf("expected direct-resolved IPs to be probed, got %#v", probe.calls)
 	}
 }
 

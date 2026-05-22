@@ -97,6 +97,10 @@ func TestSetDnsForcesDNSServerDialerResolutionToIPv4WhenIPv6Disabled(t *testing.
 		t.Fatal(err)
 	}
 
+	if got := options.DNS.Strategy; got != option.DomainStrategy(dns.DomainStrategyUseIPv4) {
+		t.Fatalf("expected DNS client strategy to be IPv4-only when IPv6 is disabled, got %s", got)
+	}
+
 	for _, tag := range []string{DNSRemoteTag, DNSRemoteTagFallback, DNSTricksDirectTag, DNSDirectTag, DNSRemoteNoWarpTag} {
 		server := findTestDNSServer(t, options.DNS.Servers, tag)
 		dialer := takeTestDNSServerDialerOptions(t, server)

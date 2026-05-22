@@ -101,6 +101,17 @@ type dynamicDirectBypassRemoteProbeKey struct {
 	port uint16
 }
 
+func dynamicDirectBypassRemoteProbeFailureLogLevel(routeRemoved bool) LogLevel {
+	if routeRemoved {
+		return LogLevel_INFO
+	}
+	return LogLevel_DEBUG
+}
+
+func dynamicDirectBypassOptionalLookupFailureLogLevel() LogLevel {
+	return LogLevel_DEBUG
+}
+
 type dynamicDirectBypassRouteManager interface {
 	AddHostRoute(ctx context.Context, addr netip.Addr) error
 	DeleteHostRoute(ctx context.Context, addr netip.Addr) error
@@ -345,7 +356,7 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 						changed = true
 						routeRulesChanged = true
 						m.markRemoteFailureProbeFailedLocked(candidate, ip, now)
-						Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass remote fallback direct probe failed, route removed: ", candidate.Host, " -> ", ip, " ", err)
+						Log(dynamicDirectBypassRemoteProbeFailureLogLevel(true), LogType_CORE, "dynamic direct bypass remote fallback direct probe failed, route removed: ", candidate.Host, " -> ", ip, " ", err)
 						continue
 					}
 					m.clearRemoteFailureProbeFailedLocked(candidate, ip)
@@ -374,7 +385,7 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 						Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass delete failed remote fallback route failed: ", ip, " ", deleteErr)
 					}
 					m.markRemoteFailureProbeFailedLocked(candidate, ip, now)
-					Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass remote fallback direct probe failed: ", candidate.Host, " -> ", ip, " ", err)
+					Log(dynamicDirectBypassRemoteProbeFailureLogLevel(false), LogType_CORE, "dynamic direct bypass remote fallback direct probe failed: ", candidate.Host, " -> ", ip, " ", err)
 					continue
 				}
 				m.clearRemoteFailureProbeFailedLocked(candidate, ip)
@@ -480,11 +491,11 @@ func (m *dynamicDirectBypassManager) probeRemoteFailureDirectRoute(
 	}
 	startedAt := time.Now()
 	if err := probe.ProbeDirect(ctx, candidate.Host, ip, port); err != nil {
-		LogTiming("DynamicDirectBypass remote fallback direct probe failed after ", time.Since(startedAt),
+		Log(LogLevel_DEBUG, LogType_CORE, "TIMING DynamicDirectBypass remote fallback direct probe failed after ", time.Since(startedAt),
 			" host=", candidate.Host, " ip=", ip, " port=", port)
 		return err
 	}
-	LogTiming("DynamicDirectBypass remote fallback direct probe succeeded in ", time.Since(startedAt),
+	Log(LogLevel_DEBUG, LogType_CORE, "TIMING DynamicDirectBypass remote fallback direct probe succeeded in ", time.Since(startedAt),
 		" host=", candidate.Host, " ip=", ip, " port=", port)
 	return nil
 }
@@ -636,7 +647,7 @@ func (m *dynamicDirectBypassManager) applyDNSCacheCandidates(ctx context.Context
 	}
 	candidates, err := m.dnsCache.LookupCachedHostIPs(ctx, m.config.EagerSuffixes)
 	if err != nil {
-		Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass dns cache lookup failed: ", err)
+		Log(dynamicDirectBypassOptionalLookupFailureLogLevel(), LogType_CORE, "dynamic direct bypass dns cache lookup failed: ", err)
 		return
 	}
 	if len(candidates) == 0 {
@@ -660,6 +671,20 @@ func (m *dynamicDirectBypassManager) expandCandidateIPs(
 		}
 		seen[ip] = struct{}{}
 		ips = append(ips, ip)
+	}
+	if candidate.Reason == "remote-failure" && m.resolver != nil {
+		if resolved, err := m.resolver.LookupNetIP(ctx, "ip4", candidate.Host); err == nil {
+			for _, ip := range resolved {
+				addIP(ip)
+				if len(ips) >= m.config.MaxRoutesPerHost {
+					break
+				}
+			}
+		}
+		if len(ips) > 0 {
+			sortAddrSlice(ips)
+			return ips
+		}
 	}
 	for _, ip := range candidate.IPs {
 		addIP(ip)

@@ -125,6 +125,9 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 			Rules: []option.DNSRule{},
 		},
 	}
+	if dnsServerDialerStrategy == option.DomainStrategy(C.DomainStrategyIPv4Only) {
+		dnsOptions.Strategy = dnsServerDialerStrategy
+	}
 	if opt.EnableFakeDNS {
 		inet4Range := badoption.Prefix(netip.MustParsePrefix("198.18.0.0/15"))
 		inet6Range := badoption.Prefix(netip.MustParsePrefix("fc00::/18"))

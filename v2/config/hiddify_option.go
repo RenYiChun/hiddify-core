@@ -72,9 +72,12 @@ type RouteOptions struct {
 	BypassLAN                        bool                  `json:"bypass-lan,omitempty"`
 	AllowConnectionFromLAN           bool                  `json:"allow-connection-from-lan,omitempty"`
 	BlockQuic                        bool                  `json:"block-quic,omitempty"`
+	RouteRulesPath                   string                `json:"route-rules-path,omitempty"`
 	DirectDomainSuffixRulesPath      string                `json:"direct-domain-suffix-rules-path,omitempty"`
 	DirectRouteConnectionLimit       int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
 	ProxyRouteConnectionLimit        int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
+	EnableProcessDirectRules         bool                  `json:"enable-process-direct-rules,omitempty" overridable:"true"`
+	ProcessDirectRuleNames           []string              `json:"process-direct-rule-names,omitempty" overridable:"true"`
 	EnableDynamicDirectBypass        bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
 	DynamicDirectBypassRoutesPath    string                `json:"dynamic-direct-bypass-routes-path,omitempty"`
 	DynamicDirectBypassTTL           DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
@@ -158,6 +161,8 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			AllowConnectionFromLAN:           false,
 			DirectRouteConnectionLimit:       DefaultDirectRouteConnectionLimit,
 			ProxyRouteConnectionLimit:        DefaultProxyRouteConnectionLimit,
+			EnableProcessDirectRules:         false,
+			ProcessDirectRuleNames:           nil,
 			EnableDynamicDirectBypass:        true,
 			DynamicDirectBypassTTL:           DefaultDynamicDirectBypassTTL,
 			DynamicDirectBypassMaxRoutes:     DefaultDynamicDirectBypassMaxRoutes,
