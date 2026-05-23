@@ -153,6 +153,7 @@ func TestSelectDynamicDirectBypassCandidatesSelectsHotDirectHost(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}
 	connections := []dynamicDirectBypassConnection{
 		hotDirectConnection("cube.weixinbridge.com", "101.226.99.155"),
@@ -362,6 +363,7 @@ func TestSelectDynamicDirectBypassCandidatesSelectsSingleRemoteHandshakeFailure(
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}
 	connections := []dynamicDirectBypassConnection{
 		remoteHandshakeFailureConnection("smartservice.console.aliyun.com", "47.89.238.193"),
@@ -377,6 +379,23 @@ func TestSelectDynamicDirectBypassCandidatesSelectsSingleRemoteHandshakeFailure(
 	}
 	if !containsAddr(candidates[0].IPs, netip.MustParseAddr("47.89.238.193")) {
 		t.Fatalf("expected observed Aliyun IP in candidate, got %#v", candidates[0].IPs)
+	}
+}
+
+func TestSelectDynamicDirectBypassCandidatesSkipsRemoteFailureOutsideEagerSuffixes(t *testing.T) {
+	cfg := dynamicDirectBypassConfig{
+		Enabled:          true,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
+	}
+	connections := []dynamicDirectBypassConnection{
+		remoteHandshakeFailureConnection("chatgpt.com", "172.64.155.209"),
+	}
+
+	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+
+	if len(candidates) != 0 {
+		t.Fatalf("expected non-direct remote failure not to seed bypass routes, got %#v", candidates)
 	}
 }
 
@@ -459,6 +478,7 @@ func TestDynamicDirectBypassManagerKeepsRemoteFailureRouteOnlyAfterSuccessfulDir
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, nil, nil, cachePath)
 	manager.directProbe = probe
 	candidate := dynamicDirectBypassCandidate{
@@ -494,6 +514,7 @@ func TestDynamicDirectBypassManagerCachesRemoteFailureRouteInCacheOnlyMode(t *te
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, cacheOnlyDynamicDirectBypassRouteManager{}, nil, nil, cachePath)
 	manager.directProbe = probe
 	notifications := 0
@@ -529,6 +550,7 @@ func TestDynamicDirectBypassManagerNotifiesWhenNewRouteCanAffectRoutingRules(t *
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, nil, nil, "")
 	manager.directProbe = &fakeDynamicDirectBypassDirectProbe{}
 	notifications := 0
@@ -801,6 +823,46 @@ func TestDynamicDirectBypassManagerDropsRemoteFailureRouteWhenDirectProbeFails(t
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"google.com"},
+	}, routeManager, nil, nil, cachePath)
+	manager.directProbe = probe
+	candidate := dynamicDirectBypassCandidate{
+		Host:      "mtalk.google.com",
+		IPs:       []netip.Addr{netip.MustParseAddr("142.250.99.188")},
+		Reason:    "remote-failure",
+		ProbePort: 443,
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != netip.MustParseAddr("142.250.99.188") {
+		t.Fatalf("expected temporary route to be added for direct probe, got %#v", routeManager.added)
+	}
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != netip.MustParseAddr("142.250.99.188") {
+		t.Fatalf("expected failed direct probe route to be deleted, got %#v", routeManager.deleted)
+	}
+	if len(manager.routes) != 0 {
+		t.Fatalf("expected failed direct probe route not to be kept, got %#v", manager.routes)
+	}
+	if _, err := os.Stat(cachePath); err == nil {
+		cached := readDynamicDirectBypassCache(t, cachePath)
+		t.Fatalf("expected failed direct probe route not to be cached, got %#v", cached)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
+func TestDynamicDirectBypassManagerSkipsRemoteFailureOutsideEagerSuffixes(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	probe := &fakeDynamicDirectBypassDirectProbe{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, nil, nil, cachePath)
 	manager.directProbe = probe
 	candidate := dynamicDirectBypassCandidate{
@@ -812,18 +874,18 @@ func TestDynamicDirectBypassManagerDropsRemoteFailureRouteWhenDirectProbeFails(t
 
 	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
 
-	if len(routeManager.added) != 1 || routeManager.added[0] != netip.MustParseAddr("172.64.155.209") {
-		t.Fatalf("expected temporary route to be added for direct probe, got %#v", routeManager.added)
+	if len(routeManager.added) != 0 || len(routeManager.deleted) != 0 {
+		t.Fatalf("expected non-eager remote failure route to be ignored, added=%#v deleted=%#v", routeManager.added, routeManager.deleted)
 	}
-	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != netip.MustParseAddr("172.64.155.209") {
-		t.Fatalf("expected failed direct probe route to be deleted, got %#v", routeManager.deleted)
+	if len(probe.calls) != 0 {
+		t.Fatalf("expected non-eager remote failure route not to be probed, got %#v", probe.calls)
 	}
 	if len(manager.routes) != 0 {
-		t.Fatalf("expected failed direct probe route not to be kept, got %#v", manager.routes)
+		t.Fatalf("expected non-eager remote failure route not to be kept, got %#v", manager.routes)
 	}
 	if _, err := os.Stat(cachePath); err == nil {
 		cached := readDynamicDirectBypassCache(t, cachePath)
-		t.Fatalf("expected failed direct probe route not to be cached, got %#v", cached)
+		t.Fatalf("expected non-eager remote failure route not to be cached, got %#v", cached)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
@@ -839,18 +901,19 @@ func TestDynamicDirectBypassManagerRemovesExistingRouteWhenRemoteFailureProbeFai
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"google.com"},
 	}, routeManager, nil, nil, cachePath)
 	manager.directProbe = probe
-	ip := netip.MustParseAddr("104.18.32.47")
+	ip := netip.MustParseAddr("142.250.99.188")
 	manager.routes[ip] = dynamicDirectBypassRoute{
-		Host:      "chatgpt.com",
+		Host:      "mtalk.google.com",
 		IP:        ip.String(),
 		LastSeen:  now.Add(-time.Minute),
 		ExpiresAt: now.Add(time.Hour),
 	}
 	manager.saveCacheLocked()
 	candidate := dynamicDirectBypassCandidate{
-		Host:      "chatgpt.com",
+		Host:      "mtalk.google.com",
 		IPs:       []netip.Addr{ip},
 		Reason:    "remote-failure",
 		ProbePort: 443,
@@ -881,6 +944,7 @@ func TestDynamicDirectBypassManagerRemovesExistingRouteAfterFailedDirectAttempt(
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"google.com"},
 	}, routeManager, nil, nil, cachePath)
 	ip := netip.MustParseAddr("172.64.155.209")
 	manager.routes[ip] = dynamicDirectBypassRoute{
@@ -918,6 +982,59 @@ func TestDynamicDirectBypassManagerRemovesExistingRouteAfterFailedDirectAttempt(
 	}
 }
 
+func TestDynamicDirectBypassManagerBacksOffFailedDirectRoute(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"google.com"},
+	}, routeManager, nil, nil, cachePath)
+	ip := netip.MustParseAddr("142.251.34.91")
+	manager.routes[ip] = dynamicDirectBypassRoute{
+		Host:      "storage.googleapis.com",
+		IP:        ip.String(),
+		LastSeen:  now.Add(-time.Minute),
+		ExpiresAt: now.Add(time.Hour),
+	}
+	manager.saveCacheLocked()
+
+	manager.cleanupFailedDirectRoutes(context.Background(), []dynamicDirectBypassConnection{
+		{
+			Host:            "storage.googleapis.com",
+			Destination:     ip,
+			DestinationPort: 443,
+			Network:         "tcp",
+			Outbound:        "direct §hide§",
+			OutboundType:    "direct",
+			Chain:           []string{"direct §hide§"},
+			Upload:          512,
+			Download:        0,
+			CreatedAt:       now,
+			ClosedAt:        now.Add(2 * time.Second),
+		},
+	})
+	candidate := dynamicDirectBypassCandidate{
+		Host: "storage.googleapis.com",
+		IPs:  []netip.Addr{ip},
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(time.Minute))
+
+	if len(routeManager.added) != 0 {
+		t.Fatalf("expected recent failed direct route not to be re-added, got %#v", routeManager.added)
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(6*time.Minute))
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != ip {
+		t.Fatalf("expected failed direct route to retry after backoff, got %#v", routeManager.added)
+	}
+}
+
 func TestDynamicDirectBypassManagerBacksOffFailedRemoteProbe(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	routeManager := &fakeDynamicDirectBypassRouteManager{}
@@ -928,6 +1045,7 @@ func TestDynamicDirectBypassManagerBacksOffFailedRemoteProbe(t *testing.T) {
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"google.com"},
 	}, routeManager, nil, nil, cachePath)
 	manager.directProbe = probe
 	candidate := dynamicDirectBypassCandidate{
@@ -968,6 +1086,7 @@ func TestDynamicDirectBypassManagerPreservesCacheOnCloseAndDeletesRoutes(t *test
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"huaweicloud.com"},
 	}, routeManager, nil, nil, cachePath)
 	candidate := dynamicDirectBypassCandidate{
 		Host: "cube.weixinbridge.com",
@@ -995,6 +1114,7 @@ func TestDynamicDirectBypassManagerClosesRoutesInBatchWhenAvailable(t *testing.T
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, nil, nil, cachePath)
 	manager.routes[netip.MustParseAddr("101.226.99.155")] = dynamicDirectBypassRoute{
 		Host:      "cube.weixinbridge.com",
@@ -1150,6 +1270,7 @@ func TestDynamicDirectBypassManagerDropsCachedHiddifyOwnRoutesOnLoad(t *testing.
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, nil, nil, cachePath)
 
 	if err := manager.loadCacheAndApply(context.Background(), now); err != nil {
@@ -1162,6 +1283,48 @@ func TestDynamicDirectBypassManagerDropsCachedHiddifyOwnRoutesOnLoad(t *testing.
 	cached := readDynamicDirectBypassCache(t, cachePath)
 	if len(cached) != 1 || cached[0].IP != "47.89.238.193" {
 		t.Fatalf("expected Hiddify-owned route to be pruned from cache, got %#v", cached)
+	}
+}
+
+func TestDynamicDirectBypassManagerDropsLegacyCachedRoutesOutsideEagerSuffixes(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	writeDynamicDirectBypassCache(t, cachePath, []dynamicDirectBypassRoute{
+		{
+			Host:      "chatgpt.com",
+			IP:        "172.64.155.209",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+		{
+			Host:      "smartservice.console.aliyun.com",
+			IP:        "47.89.238.193",
+			LastSeen:  now,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+	})
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
+	}, routeManager, nil, nil, cachePath)
+
+	if err := manager.loadCacheAndApply(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != netip.MustParseAddr("172.64.155.209") {
+		t.Fatalf("expected legacy non-eager cached route to be deleted, got %#v", routeManager.deleted)
+	}
+	if len(routeManager.added) != 1 || routeManager.added[0] != netip.MustParseAddr("47.89.238.193") {
+		t.Fatalf("expected eager legacy cached route to be restored, got %#v", routeManager.added)
+	}
+	cached := readDynamicDirectBypassCache(t, cachePath)
+	if len(cached) != 1 || cached[0].IP != "47.89.238.193" {
+		t.Fatalf("expected non-eager legacy cached route to be pruned, got %#v", cached)
 	}
 }
 
@@ -1188,6 +1351,7 @@ func TestDynamicDirectBypassManagerLoadsCachedRoutesInBatchWhenAvailable(t *test
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"huaweicloud.com"},
 	}, routeManager, nil, nil, cachePath)
 
 	if err := manager.loadCacheAndApply(context.Background(), now); err != nil {
@@ -1265,6 +1429,7 @@ func TestDynamicDirectBypassManagerResolvesHotDomainWhenObservedIPIsMissing(t *t
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, fakeDynamicDirectBypassResolver{
 		"cube.weixinbridge.com": {netip.MustParseAddr("101.226.99.155")},
 	}, nil, "")
@@ -1301,6 +1466,7 @@ func TestDynamicDirectBypassManagerDoesNotResolveObservedNonEagerHost(t *testing
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, fakeDynamicDirectBypassResolver{
 		"docs.qq.com": {
 			netip.MustParseAddr("43.154.240.12"),
@@ -1357,6 +1523,7 @@ func TestDynamicDirectBypassManagerPrefersResolvedIPsForRemoteFailures(t *testin
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"aliyun.com"},
 	}, routeManager, fakeDynamicDirectBypassResolver{
 		"www.aliyun.com": {
 			netip.MustParseAddr("183.61.14.229"),

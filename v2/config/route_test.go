@@ -292,6 +292,7 @@ func TestSetRoutingOptionsAddsDynamicDirectBypassIPRules(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte(`[
 		{"host":"smartservice.console.aliyun.com","ip":"47.89.238.193","expires_at":"`+future+`"},
 		{"host":"smartservice.console.aliyun.com","ip":"47.88.73.20","expires_at":"`+future+`"},
+		{"host":"chatgpt.com","ip":"172.64.155.209","expires_at":"`+future+`"},
 		{"host":"cp.cloudflare.com","ip":"104.18.32.47","process_name":"Hiddify.exe","process_path":"D:\\github.com\\hiddify-app\\build\\windows\\x64\\runner\\Debug\\Hiddify.exe","expires_at":"`+future+`"},
 		{"host":"expired.example.com","ip":"47.88.73.19","expires_at":"`+past+`"},
 		{"host":"private.example.com","ip":"192.168.1.20","expires_at":"`+future+`"}
@@ -343,7 +344,8 @@ func TestSetRoutingOptionsAddsDynamicDirectBypassDomainRulesOutsideTun(t *testin
 	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
 	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
 	if err := os.WriteFile(cachePath, []byte(`[
-		{"host":"smartservice.console.aliyun.com","ip":"47.96.247.67","expires_at":"`+future+`"}
+		{"host":"smartservice.console.aliyun.com","ip":"47.96.247.67","expires_at":"`+future+`"},
+		{"host":"chatgpt.com","ip":"104.18.32.47","expires_at":"`+future+`"}
 	]`), 0o644); err != nil {
 		t.Fatal(err)
 	}

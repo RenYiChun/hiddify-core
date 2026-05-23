@@ -67,22 +67,25 @@ type URLTestOptions struct {
 }
 
 type RouteOptions struct {
-	ResolveDestination               bool                  `json:"resolve-destination,omitempty"`
-	IPv6Mode                         option.DomainStrategy `json:"ipv6-mode,omitempty"`
-	BypassLAN                        bool                  `json:"bypass-lan,omitempty"`
-	AllowConnectionFromLAN           bool                  `json:"allow-connection-from-lan,omitempty"`
-	BlockQuic                        bool                  `json:"block-quic,omitempty"`
-	RouteRulesPath                   string                `json:"route-rules-path,omitempty"`
-	DirectDomainSuffixRulesPath      string                `json:"direct-domain-suffix-rules-path,omitempty"`
-	DirectRouteConnectionLimit       int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
-	ProxyRouteConnectionLimit        int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
-	EnableProcessDirectRules         bool                  `json:"enable-process-direct-rules,omitempty" overridable:"true"`
-	ProcessDirectRuleNames           []string              `json:"process-direct-rule-names,omitempty" overridable:"true"`
-	EnableDynamicDirectBypass        bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
-	DynamicDirectBypassRoutesPath    string                `json:"dynamic-direct-bypass-routes-path,omitempty"`
-	DynamicDirectBypassTTL           DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
-	DynamicDirectBypassMaxRoutes     int                   `json:"dynamic-direct-bypass-max-routes,omitempty" overridable:"true"`
-	DynamicDirectBypassMaxRoutesHost int                   `json:"dynamic-direct-bypass-max-routes-per-host,omitempty" overridable:"true"`
+	ResolveDestination                 bool                  `json:"resolve-destination,omitempty"`
+	IPv6Mode                           option.DomainStrategy `json:"ipv6-mode,omitempty"`
+	BypassLAN                          bool                  `json:"bypass-lan,omitempty"`
+	AllowConnectionFromLAN             bool                  `json:"allow-connection-from-lan,omitempty"`
+	BlockQuic                          bool                  `json:"block-quic,omitempty"`
+	RouteRulesPath                     string                `json:"route-rules-path,omitempty"`
+	DirectDomainSuffixRulesPath        string                `json:"direct-domain-suffix-rules-path,omitempty"`
+	DirectRouteConnectionLimit         int                   `json:"direct-route-connection-limit,omitempty" overridable:"true"`
+	ProxyRouteConnectionLimit          int                   `json:"proxy-route-connection-limit,omitempty" overridable:"true"`
+	EnableProcessDirectRules           bool                  `json:"enable-process-direct-rules,omitempty" overridable:"true"`
+	ProcessDirectRuleNames             []string              `json:"process-direct-rule-names,omitempty" overridable:"true"`
+	EnableProcessStableProxyRules      bool                  `json:"enable-process-stable-proxy-rules,omitempty" overridable:"true"`
+	ProcessStableProxyRuleNames        []string              `json:"process-stable-proxy-rule-names,omitempty" overridable:"true"`
+	ProcessStableProxyExcludedKeywords []string              `json:"process-stable-proxy-excluded-outbound-keywords,omitempty" overridable:"true"`
+	EnableDynamicDirectBypass          bool                  `json:"enable-dynamic-direct-bypass,omitempty" overridable:"true"`
+	DynamicDirectBypassRoutesPath      string                `json:"dynamic-direct-bypass-routes-path,omitempty"`
+	DynamicDirectBypassTTL             DurationInSeconds     `json:"dynamic-direct-bypass-ttl,omitempty" overridable:"true"`
+	DynamicDirectBypassMaxRoutes       int                   `json:"dynamic-direct-bypass-max-routes,omitempty" overridable:"true"`
+	DynamicDirectBypassMaxRoutesHost   int                   `json:"dynamic-direct-bypass-max-routes-per-host,omitempty" overridable:"true"`
 }
 
 type TLSTricks struct {
@@ -155,18 +158,21 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			// URLTestIdleTimeout: DurationInSeconds(6000),
 		},
 		RouteOptions: RouteOptions{
-			ResolveDestination:               false,
-			IPv6Mode:                         option.DomainStrategy(dns.DomainStrategyAsIS),
-			BypassLAN:                        true,
-			AllowConnectionFromLAN:           false,
-			DirectRouteConnectionLimit:       DefaultDirectRouteConnectionLimit,
-			ProxyRouteConnectionLimit:        DefaultProxyRouteConnectionLimit,
-			EnableProcessDirectRules:         false,
-			ProcessDirectRuleNames:           nil,
-			EnableDynamicDirectBypass:        true,
-			DynamicDirectBypassTTL:           DefaultDynamicDirectBypassTTL,
-			DynamicDirectBypassMaxRoutes:     DefaultDynamicDirectBypassMaxRoutes,
-			DynamicDirectBypassMaxRoutesHost: DefaultDynamicDirectBypassMaxRoutesHost,
+			ResolveDestination:                 false,
+			IPv6Mode:                           option.DomainStrategy(dns.DomainStrategyAsIS),
+			BypassLAN:                          true,
+			AllowConnectionFromLAN:             false,
+			DirectRouteConnectionLimit:         DefaultDirectRouteConnectionLimit,
+			ProxyRouteConnectionLimit:          DefaultProxyRouteConnectionLimit,
+			EnableProcessDirectRules:           false,
+			ProcessDirectRuleNames:             nil,
+			EnableProcessStableProxyRules:      false,
+			ProcessStableProxyRuleNames:        nil,
+			ProcessStableProxyExcludedKeywords: nil,
+			EnableDynamicDirectBypass:          true,
+			DynamicDirectBypassTTL:             DefaultDynamicDirectBypassTTL,
+			DynamicDirectBypassMaxRoutes:       DefaultDynamicDirectBypassMaxRoutes,
+			DynamicDirectBypassMaxRoutesHost:   DefaultDynamicDirectBypassMaxRoutesHost,
 		},
 		LogLevel: "warn",
 		// LogFile:        "/dev/null",

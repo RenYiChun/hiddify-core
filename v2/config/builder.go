@@ -43,11 +43,12 @@ const (
 	OutboundDirectTag = "direct §hide§"
 	OutboundBypassTag = "bypass §hide§"
 	// OutboundBlockTag          = "block §hide§"
-	OutboundSelectTag         = "select"
-	OutboundURLTestTag        = "lowest"
-	OutboundRoundRobinTag     = "balance"
-	OutboundDNSTag            = "dns-out §hide§"
-	OutboundDirectFragmentTag = "direct-fragment §hide§"
+	OutboundSelectTag             = "select"
+	OutboundURLTestTag            = "lowest"
+	OutboundRoundRobinTag         = "balance"
+	OutboundProcessStableProxyTag = "process-stable-proxy §hide§"
+	OutboundDNSTag                = "dns-out §hide§"
+	OutboundDirectFragmentTag     = "direct-fragment §hide§"
 
 	WARPConfigTag = "🔒 WARP"
 
@@ -61,7 +62,7 @@ const (
 var (
 	OutboundMainDetour       = OutboundSelectTag
 	OutboundWARPConfigDetour = OutboundDirectFragmentTag
-	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
+	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundProcessStableProxyTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
 )
 
 // TODO include selectors
@@ -241,13 +242,18 @@ func appendUniqueRouteExcludePrefixes(existing []netip.Prefix, additions []netip
 }
 
 const (
-	customRouteDirectConnectionLimitKey       = "hiddify-route-direct-connection-limit"
-	customRouteProxyConnectionLimitKey        = "hiddify-route-proxy-connection-limit"
-	customDynamicDirectBypassEnabledKey       = "hiddify-dynamic-direct-bypass-enabled"
-	customDynamicDirectBypassTTLKey           = "hiddify-dynamic-direct-bypass-ttl"
-	customDynamicDirectBypassMaxRoutesKey     = "hiddify-dynamic-direct-bypass-max-routes"
-	customDynamicDirectBypassMaxRoutesHostKey = "hiddify-dynamic-direct-bypass-max-routes-per-host"
-	customDynamicDirectBypassEagerSuffixesKey = "hiddify-dynamic-direct-bypass-eager-domain-suffixes"
+	customRouteDirectConnectionLimitKey           = "hiddify-route-direct-connection-limit"
+	customRouteProxyConnectionLimitKey            = "hiddify-route-proxy-connection-limit"
+	customDynamicDirectBypassEnabledKey           = "hiddify-dynamic-direct-bypass-enabled"
+	customDynamicDirectBypassTTLKey               = "hiddify-dynamic-direct-bypass-ttl"
+	customDynamicDirectBypassMaxRoutesKey         = "hiddify-dynamic-direct-bypass-max-routes"
+	customDynamicDirectBypassMaxRoutesHostKey     = "hiddify-dynamic-direct-bypass-max-routes-per-host"
+	customDynamicDirectBypassEagerSuffixesKey     = "hiddify-dynamic-direct-bypass-eager-domain-suffixes"
+	customProcessStableProxyEnabledKey            = "hiddify-process-stable-proxy-enabled"
+	customProcessStableProxyRuleNamesKey          = "hiddify-process-stable-proxy-rule-names"
+	customProcessStableProxyExcludedKeywordsKey   = "hiddify-process-stable-proxy-excluded-keywords"
+	customProcessStableProxyCandidateOutboundsKey = "hiddify-process-stable-proxy-candidate-outbounds"
+	customProcessStableProxyExcludedOutboundsKey  = "hiddify-process-stable-proxy-excluded-outbounds"
 )
 
 func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
@@ -282,6 +288,12 @@ func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
 		DefaultDynamicDirectBypassMaxRoutesHost,
 	)
 	custom[customDynamicDirectBypassEagerSuffixesKey] = configuredDirectDomainSuffixRules(hopt)
+	candidateOutbounds, excludedOutbounds := processStableProxyDiagnosticOutbounds(options, hopt)
+	custom[customProcessStableProxyEnabledKey] = hopt.EnableProcessStableProxyRules
+	custom[customProcessStableProxyRuleNamesKey] = processStableProxyRuleNames(hopt)
+	custom[customProcessStableProxyExcludedKeywordsKey] = processStableProxyExcludedKeywords(hopt)
+	custom[customProcessStableProxyCandidateOutboundsKey] = candidateOutbounds
+	custom[customProcessStableProxyExcludedOutboundsKey] = excludedOutbounds
 	options.Custom = &custom
 }
 
@@ -522,6 +534,9 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			defaultSelect = urlTest.Tag
 
 		}
+	}
+	if stableProcessProxy := newProcessStableProxyOutbound(tags, opt); stableProcessProxy != nil {
+		outbounds = append([]option.Outbound{*stableProcessProxy}, outbounds...)
 	}
 	selector := option.Outbound{
 		Type: C.TypeSelector,
@@ -1028,6 +1043,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		return customRouteRulesErr
 	}
 	routeRules = appendProcessDirectRouteRules(routeRules, hopt)
+	routeRules = appendProcessStableProxyRouteRules(routeRules, hopt)
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
@@ -1512,10 +1528,16 @@ func localRuleSetFileExists(path string) bool {
 type dynamicDirectBypassRouteCacheEntry struct {
 	Host        string    `json:"host"`
 	IP          string    `json:"ip"`
+	Reason      string    `json:"reason,omitempty"`
 	ProcessName string    `json:"process_name,omitempty"`
 	ProcessPath string    `json:"process_path,omitempty"`
 	ExpiresAt   time.Time `json:"expires_at"`
 }
+
+const (
+	dynamicDirectBypassRouteReasonDirect        = "direct"
+	dynamicDirectBypassRouteReasonRemoteFailure = "remote-failure"
+)
 
 func appendDynamicDirectBypassDomainRouteRules(routeRules []option.Rule, matchers dynamicDirectBypassRouteMatchers) []option.Rule {
 	if len(matchers.domains) == 0 && len(matchers.cidrs) == 0 {
@@ -1608,6 +1630,7 @@ func loadDynamicDirectBypassRouteMatchers(hopt *HiddifyOptions, now time.Time) d
 	hostCounts := map[string]int{}
 	seenCIDRs := map[string]struct{}{}
 	seenDomains := map[string]struct{}{}
+	eagerSuffixes := normalizeDynamicDirectBypassConfigSuffixes(configuredDirectDomainSuffixRules(hopt))
 	domains := make([]string, 0, len(entries))
 	cidrs := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -1620,11 +1643,14 @@ func loadDynamicDirectBypassRouteMatchers(hopt *HiddifyOptions, now time.Time) d
 		if !entry.ExpiresAt.IsZero() && !now.Before(entry.ExpiresAt) {
 			continue
 		}
+		host := strings.ToLower(strings.TrimSpace(entry.Host))
+		if !shouldUseDynamicDirectBypassCachedRouteMatcher(entry, host, eagerSuffixes) {
+			continue
+		}
 		addr, err := netip.ParseAddr(entry.IP)
 		if err != nil || !isDynamicDirectBypassConfigRouteIP(addr) {
 			continue
 		}
-		host := strings.ToLower(strings.TrimSpace(entry.Host))
 		if host != "" {
 			if hostCounts[host] >= maxRoutesPerHost {
 				continue
@@ -1685,6 +1711,53 @@ func isDynamicDirectBypassConfigSelfRoute(entry dynamicDirectBypassRouteCacheEnt
 		}
 	}
 	return processName == "hiddify.exe" || processName == "hiddify"
+}
+
+func shouldUseDynamicDirectBypassCachedRouteMatcher(
+	entry dynamicDirectBypassRouteCacheEntry,
+	host string,
+	eagerSuffixes []string,
+) bool {
+	switch strings.ToLower(strings.TrimSpace(entry.Reason)) {
+	case dynamicDirectBypassRouteReasonDirect:
+		return true
+	case dynamicDirectBypassRouteReasonRemoteFailure:
+		return matchesDynamicDirectBypassConfigSuffix(host, eagerSuffixes)
+	case "":
+		return matchesDynamicDirectBypassConfigSuffix(host, eagerSuffixes)
+	default:
+		return matchesDynamicDirectBypassConfigSuffix(host, eagerSuffixes)
+	}
+}
+
+func normalizeDynamicDirectBypassConfigSuffixes(values []string) []string {
+	suffixes := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		suffix := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "*.")))
+		suffix = strings.TrimSuffix(suffix, ".")
+		if suffix == "" {
+			continue
+		}
+		if _, exists := seen[suffix]; exists {
+			continue
+		}
+		seen[suffix] = struct{}{}
+		suffixes = append(suffixes, suffix)
+	}
+	sort.Strings(suffixes)
+	return suffixes
+}
+
+func matchesDynamicDirectBypassConfigSuffix(host string, suffixes []string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	for _, suffix := range suffixes {
+		trimmed := strings.TrimPrefix(suffix, ".")
+		if host == trimmed || strings.HasSuffix(host, "."+trimmed) {
+			return true
+		}
+	}
+	return false
 }
 
 func patchHiddifyWarpFromConfig(out *option.Outbound, opt HiddifyOptions) *option.Outbound {
