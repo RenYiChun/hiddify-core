@@ -69,6 +69,56 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 	}
 }
 
+func TestSetOutboundsFallsBackToAllProxyNodesWhenAllMatchExcludedKeywords(t *testing.T) {
+	var options option.Options
+	staticIPs := map[string][]string{}
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type:    C.TypeNaive,
+				Tag:     "209.87.93.20 NaiveTLS § 443 1",
+				Options: &option.NaiveOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 h3_quic xhttp direct vless § 443 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 TUIC § 43553 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+		},
+	}
+
+	if err := setOutbounds(&options, input, &HiddifyOptions{
+		RouteOptions: RouteOptions{
+			EnableProcessStableProxyRules: true,
+			ProcessStableProxyRuleNames:   []string{"codex.exe"},
+		},
+	}, &staticIPs); err != nil {
+		t.Fatal(err)
+	}
+
+	outbound := findTestOutbound(options.Outbounds, OutboundProcessStableProxyTag)
+	if outbound == nil {
+		t.Fatalf("expected %q outbound to fall back to all proxy nodes", OutboundProcessStableProxyTag)
+	}
+	balancerOptions, ok := outbound.Options.(*option.BalancerOutboundOptions)
+	if !ok {
+		t.Fatalf("expected balancer options for %q, got %T", outbound.Tag, outbound.Options)
+	}
+	expected := []string{
+		"209.87.93.20 NaiveTLS § 443 1",
+		"209.87.93.20 h3_quic xhttp direct vless § 443 1",
+		"209.87.93.20 TUIC § 43553 1",
+	}
+	if !stringSlicesEqual(balancerOptions.Outbounds, expected) {
+		t.Fatalf("expected fallback outbounds %#v, got %#v", expected, balancerOptions.Outbounds)
+	}
+}
+
 func TestSetRoutingOptionsAddsProcessStableProxyRuleWhenEnabled(t *testing.T) {
 	options := option.Options{DNS: &option.DNSOptions{}}
 	if err := setRoutingOptions(&options, &HiddifyOptions{

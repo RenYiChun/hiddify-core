@@ -9,19 +9,21 @@ import (
 
 var defaultProcessStableProxyExcludedKeywords = []string{"naive", "quic", "tuic"}
 
+const processStableProxyFallbackReasonNoStableCandidates = "no stable candidates after excluded keywords"
+
 func newProcessStableProxyOutbound(tags []string, hopt *HiddifyOptions) *option.Outbound {
 	if len(processStableProxyRuleNames(hopt)) == 0 {
 		return nil
 	}
-	stableTags := filterProcessStableProxyOutbounds(tags, processStableProxyExcludedKeywords(hopt))
-	if len(stableTags) == 0 {
+	outboundTags, _ := selectProcessStableProxyOutbounds(tags, processStableProxyExcludedKeywords(hopt))
+	if len(outboundTags) == 0 {
 		return nil
 	}
 	return &option.Outbound{
 		Type: C.TypeBalancer,
 		Tag:  OutboundProcessStableProxyTag,
 		Options: &option.BalancerOutboundOptions{
-			Outbounds:                 stableTags,
+			Outbounds:                 outboundTags,
 			Strategy:                  "lowest-delay",
 			DelayAcceptableRatio:      2,
 			Tolerance:                 1,
@@ -103,26 +105,31 @@ func filterProcessStableProxyOutbounds(tags []string, excludedKeywords []string)
 	return stableTags
 }
 
-func processStableProxyDiagnosticOutbounds(options *option.Options, hopt *HiddifyOptions) ([]string, []string) {
+func selectProcessStableProxyOutbounds(tags []string, excludedKeywords []string) ([]string, bool) {
+	cleanedTags := cleanStringList(tags)
+	if len(cleanedTags) == 0 {
+		return nil, false
+	}
+	stableTags := filterProcessStableProxyOutbounds(cleanedTags, excludedKeywords)
+	if len(stableTags) > 0 {
+		return stableTags, false
+	}
+	return cleanedTags, true
+}
+
+func processStableProxyDiagnosticOutbounds(options *option.Options, hopt *HiddifyOptions) ([]string, []string, bool, string) {
 	if options == nil {
-		return nil, nil
+		return nil, nil, false, ""
 	}
 	candidates := processStableProxyCandidateOutbounds(options)
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, nil, false, ""
 	}
 	excludedKeywords := processStableProxyExcludedKeywords(hopt)
 	excluded := make([]string, 0)
-	candidateSet := make(map[string]struct{}, len(candidates))
-	for _, tag := range candidates {
-		candidateSet[tag] = struct{}{}
-	}
 	for _, outbound := range options.Outbounds {
 		tag := strings.TrimSpace(outbound.Tag)
 		if tag == "" {
-			continue
-		}
-		if _, ok := candidateSet[tag]; ok {
 			continue
 		}
 		if containsPredefinedOutboundTag(tag) {
@@ -132,7 +139,12 @@ func processStableProxyDiagnosticOutbounds(options *option.Options, hopt *Hiddif
 			excluded = append(excluded, tag)
 		}
 	}
-	return candidates, cleanStringList(excluded)
+	fallback := len(filterProcessStableProxyOutbounds(candidates, excludedKeywords)) == 0
+	reason := ""
+	if fallback {
+		reason = processStableProxyFallbackReasonNoStableCandidates
+	}
+	return candidates, cleanStringList(excluded), fallback, reason
 }
 
 func processStableProxyCandidateOutbounds(options *option.Options) []string {

@@ -254,6 +254,8 @@ const (
 	customProcessStableProxyExcludedKeywordsKey   = "hiddify-process-stable-proxy-excluded-keywords"
 	customProcessStableProxyCandidateOutboundsKey = "hiddify-process-stable-proxy-candidate-outbounds"
 	customProcessStableProxyExcludedOutboundsKey  = "hiddify-process-stable-proxy-excluded-outbounds"
+	customProcessStableProxyFallbackKey           = "hiddify-process-stable-proxy-fallback"
+	customProcessStableProxyFallbackReasonKey     = "hiddify-process-stable-proxy-fallback-reason"
 )
 
 func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
@@ -288,12 +290,14 @@ func setHiddifyCustomOptions(options *option.Options, hopt *HiddifyOptions) {
 		DefaultDynamicDirectBypassMaxRoutesHost,
 	)
 	custom[customDynamicDirectBypassEagerSuffixesKey] = configuredDirectDomainSuffixRules(hopt)
-	candidateOutbounds, excludedOutbounds := processStableProxyDiagnosticOutbounds(options, hopt)
+	candidateOutbounds, excludedOutbounds, fallback, fallbackReason := processStableProxyDiagnosticOutbounds(options, hopt)
 	custom[customProcessStableProxyEnabledKey] = hopt.EnableProcessStableProxyRules
 	custom[customProcessStableProxyRuleNamesKey] = processStableProxyRuleNames(hopt)
 	custom[customProcessStableProxyExcludedKeywordsKey] = processStableProxyExcludedKeywords(hopt)
 	custom[customProcessStableProxyCandidateOutboundsKey] = candidateOutbounds
 	custom[customProcessStableProxyExcludedOutboundsKey] = excludedOutbounds
+	custom[customProcessStableProxyFallbackKey] = fallback
+	custom[customProcessStableProxyFallbackReasonKey] = fallbackReason
 	options.Custom = &custom
 }
 

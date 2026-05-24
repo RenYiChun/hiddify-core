@@ -126,6 +126,62 @@ func TestSetHiddifyCustomOptionsAddsProcessStableProxyDiagnostics(t *testing.T) 
 	}) {
 		t.Fatalf("expected process stable proxy excluded outbounds diagnostic, got %#v", got)
 	}
+	if got := custom["hiddify-process-stable-proxy-fallback"]; got != false {
+		t.Fatalf("expected process stable proxy fallback diagnostic to be false, got %#v", got)
+	}
+	if got := custom["hiddify-process-stable-proxy-fallback-reason"]; got != "" {
+		t.Fatalf("expected empty process stable proxy fallback reason, got %#v", got)
+	}
+}
+
+func TestSetHiddifyCustomOptionsReportsProcessStableProxyFallback(t *testing.T) {
+	options := option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeBalancer,
+				Tag:  OutboundProcessStableProxyTag,
+				Options: &option.BalancerOutboundOptions{
+					Outbounds: []string{
+						"209.87.93.20 NaiveTLS § 443 1",
+						"209.87.93.20 h3_quic xhttp direct vless § 443 1",
+					},
+				},
+			},
+			{
+				Type: C.TypeNaive,
+				Tag:  "209.87.93.20 NaiveTLS § 443 1",
+			},
+			{
+				Type: C.TypeVLESS,
+				Tag:  "209.87.93.20 h3_quic xhttp direct vless § 443 1",
+			},
+		},
+	}
+	hopt := &HiddifyOptions{
+		RouteOptions: RouteOptions{
+			EnableProcessStableProxyRules: true,
+			ProcessStableProxyRuleNames:   []string{"codex.exe"},
+		},
+	}
+
+	setHiddifyCustomOptions(&options, hopt)
+
+	if options.Custom == nil {
+		t.Fatal("expected custom options")
+	}
+	custom := *options.Custom
+	if got := custom["hiddify-process-stable-proxy-fallback"]; got != true {
+		t.Fatalf("expected process stable proxy fallback diagnostic to be true, got %#v", got)
+	}
+	if got := custom["hiddify-process-stable-proxy-fallback-reason"]; got != "no stable candidates after excluded keywords" {
+		t.Fatalf("expected process stable proxy fallback reason, got %#v", got)
+	}
+	if got := custom[customProcessStableProxyExcludedOutboundsKey]; !stringSlicesEqual(got.([]string), []string{
+		"209.87.93.20 NaiveTLS § 443 1",
+		"209.87.93.20 h3_quic xhttp direct vless § 443 1",
+	}) {
+		t.Fatalf("expected fallback diagnostics to keep excluded outbounds, got %#v", got)
+	}
 }
 
 func TestSetHiddifyCustomOptionsDoesNotReportProcessStableProxyOutboundsWhenInactive(t *testing.T) {
