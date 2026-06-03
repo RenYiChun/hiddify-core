@@ -8,6 +8,7 @@ import (
 )
 
 var defaultProcessStableProxyExcludedKeywords = []string{"naive", "quic", "tuic"}
+var defaultMicrosoftUpdateProxyExcludedKeywords = []string{"naive", "quic", "tuic", " § 80"}
 
 const processStableProxyFallbackReasonNoStableCandidates = "no stable candidates after excluded keywords"
 
@@ -30,6 +31,43 @@ func newProcessStableProxyOutbound(tags []string, hopt *HiddifyOptions) *option.
 			InterruptExistConnections: false,
 		},
 	}
+}
+
+func newMicrosoftUpdateProxyOutbound(tags []string) *option.Outbound {
+	outboundTags, _ := selectProcessStableProxyOutbounds(tags, defaultMicrosoftUpdateProxyExcludedKeywords)
+	if len(outboundTags) == 0 {
+		return nil
+	}
+	return &option.Outbound{
+		Type: C.TypeBalancer,
+		Tag:  OutboundMicrosoftUpdateProxyTag,
+		Options: &option.BalancerOutboundOptions{
+			Outbounds:                 outboundTags,
+			Strategy:                  "lowest-delay",
+			DelayAcceptableRatio:      2,
+			Tolerance:                 1,
+			InterruptExistConnections: false,
+		},
+	}
+}
+
+func microsoftUpdateProxyOutboundTag(options *option.Options) string {
+	if hasOutboundTag(options, OutboundMicrosoftUpdateProxyTag) {
+		return OutboundMicrosoftUpdateProxyTag
+	}
+	return OutboundMainDetour
+}
+
+func hasOutboundTag(options *option.Options, tag string) bool {
+	if options == nil {
+		return false
+	}
+	for _, outbound := range options.Outbounds {
+		if outbound.Tag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func appendProcessStableProxyRouteRules(routeRules []option.Rule, hopt *HiddifyOptions) []option.Rule {

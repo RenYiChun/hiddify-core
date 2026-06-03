@@ -69,6 +69,68 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 	}
 }
 
+func TestSetOutboundsAddsMicrosoftUpdateProxyGroupFilteringDownloadUnstableKeywords(t *testing.T) {
+	var options option.Options
+	staticIPs := map[string][]string{}
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type:    C.TypeVLESS,
+				Tag:     "209.87.93.20 tls_h2 grpc direct vless § 443 1",
+				Options: &option.VLESSOutboundOptions{},
+			},
+			{
+				Type:    C.TypeVMess,
+				Tag:     "209.87.93.20 tls xhttp direct vmess dl=h2 § 443 1",
+				Options: &option.VMessOutboundOptions{},
+			},
+			{
+				Type:    C.TypeVMess,
+				Tag:     "209.87.93.20 http httpupgrade direct vmess § 80 1",
+				Options: &option.VMessOutboundOptions{},
+			},
+			{
+				Type:    C.TypeVLESS,
+				Tag:     "209.87.93.20 h3_quic xhttp direct vless dl=h1 § 443 1",
+				Options: &option.VLESSOutboundOptions{},
+			},
+			{
+				Type:    C.TypeNaive,
+				Tag:     "209.87.93.20 NaiveTLS § 443 1",
+				Options: &option.NaiveOutboundOptions{},
+			},
+			{
+				Type:    C.TypeTUIC,
+				Tag:     "209.87.93.20 TUIC § 43553 1",
+				Options: &option.TUICOutboundOptions{},
+			},
+		},
+	}
+
+	if err := setOutbounds(&options, input, &HiddifyOptions{}, &staticIPs); err != nil {
+		t.Fatal(err)
+	}
+
+	outbound := findTestOutbound(options.Outbounds, OutboundMicrosoftUpdateProxyTag)
+	if outbound == nil {
+		t.Fatal("expected Microsoft update proxy outbound group")
+	}
+	balancerOptions, ok := outbound.Options.(*option.BalancerOutboundOptions)
+	if !ok {
+		t.Fatalf("expected balancer options for %q, got %T", outbound.Tag, outbound.Options)
+	}
+	expected := []string{
+		"209.87.93.20 tls_h2 grpc direct vless § 443 1",
+		"209.87.93.20 tls xhttp direct vmess dl=h2 § 443 1",
+	}
+	if !stringSlicesEqual(balancerOptions.Outbounds, expected) {
+		t.Fatalf("expected Microsoft update proxy outbounds %#v, got %#v", expected, balancerOptions.Outbounds)
+	}
+	if balancerOptions.InterruptExistConnections {
+		t.Fatalf("expected %q not to interrupt existing connections", outbound.Tag)
+	}
+}
+
 func TestSetOutboundsFallsBackToAllProxyNodesWhenAllMatchExcludedKeywords(t *testing.T) {
 	var options option.Options
 	staticIPs := map[string][]string{}

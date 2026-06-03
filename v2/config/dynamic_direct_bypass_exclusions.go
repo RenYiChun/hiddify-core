@@ -8,6 +8,9 @@ var microsoftUpdateProxyDomainSuffixes = []string{
 	"dsp.mp.microsoft.com",
 	"emdl.ws.microsoft.com",
 	"storeedgefd.dsx.mp.microsoft.com",
+	"t-ring.msedge.net",
+	"t-ring-s2.msedge.net",
+	"c2r.ts.cdn.office.net",
 	"windowsupdate.com",
 }
 

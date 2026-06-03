@@ -705,8 +705,66 @@ func TestSetRoutingOptionsProxiesMicrosoftUpdateForEveryRegion(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			assertMicrosoftUpdateProxyRules(t, options)
+			assertMicrosoftUpdateProxyRules(t, options, OutboundMainDetour, DNSRemoteTag)
 		})
+	}
+}
+
+func TestMicrosoftUpdateProxyDomainSuffixesIncludeObservedStoreDownloadDependencies(t *testing.T) {
+	suffixes := MicrosoftUpdateProxyDomainSuffixes()
+
+	for _, expected := range []string{
+		"t-ring.msedge.net",
+		"t-ring-s2.msedge.net",
+		"c2r.ts.cdn.office.net",
+	} {
+		if !containsString(suffixes, expected) {
+			t.Fatalf("expected Microsoft update proxy suffixes to include %q, got %#v", expected, suffixes)
+		}
+	}
+}
+
+func TestSetRoutingOptionsRoutesMicrosoftUpdateThroughDedicatedProxyWhenAvailable(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSMicrosoftUpdateRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeBalancer,
+				Tag:  OutboundMicrosoftUpdateProxyTag,
+				Options: &option.BalancerOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	routeIndex, dnsIndex := assertMicrosoftUpdateProxyRules(t, options, OutboundMicrosoftUpdateProxyTag, DNSMicrosoftUpdateRemoteTag)
+	if routeIndex < 0 || dnsIndex < 0 {
+		t.Fatalf("expected Microsoft update route and DNS rules, got route=%d dns=%d", routeIndex, dnsIndex)
 	}
 }
 
@@ -730,7 +788,7 @@ func TestSetRoutingOptionsOrdersMicrosoftUpdateBeforeChinaDirectRulesInTun(t *te
 		t.Fatal(err)
 	}
 
-	proxyRuleIndex, proxyDNSRuleIndex := assertMicrosoftUpdateProxyRules(t, options)
+	proxyRuleIndex, proxyDNSRuleIndex := assertMicrosoftUpdateProxyRules(t, options, OutboundMainDetour, DNSRemoteTag)
 
 	cnDirectRuleIndex := -1
 	geositeDirectRuleIndex := -1
@@ -1127,7 +1185,7 @@ func containsString(values []string, needle string) bool {
 	return false
 }
 
-func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options) (routeIndex int, dnsIndex int) {
+func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options, expectedOutbound string, expectedDNSServer string) (routeIndex int, dnsIndex int) {
 	t.Helper()
 
 	routeIndex = -1
@@ -1137,8 +1195,8 @@ func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options) (rout
 			continue
 		}
 		routeIndex = i
-		if defaultRule.RouteOptions.Outbound != OutboundMainDetour {
-			t.Fatalf("expected Microsoft update delivery route to use %q, got %q", OutboundMainDetour, defaultRule.RouteOptions.Outbound)
+		if defaultRule.RouteOptions.Outbound != expectedOutbound {
+			t.Fatalf("expected Microsoft update delivery route to use %q, got %q", expectedOutbound, defaultRule.RouteOptions.Outbound)
 		}
 		if !containsString(defaultRule.DomainSuffix, "dsp.mp.microsoft.com") {
 			t.Fatal("expected Microsoft update route to include DSP download suffix")
@@ -1155,8 +1213,8 @@ func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options) (rout
 			continue
 		}
 		dnsIndex = i
-		if defaultRule.RouteOptions.Server != DNSRemoteTag {
-			t.Fatalf("expected Microsoft update delivery DNS to use %q, got %q", DNSRemoteTag, defaultRule.RouteOptions.Server)
+		if defaultRule.RouteOptions.Server != expectedDNSServer {
+			t.Fatalf("expected Microsoft update delivery DNS to use %q, got %q", expectedDNSServer, defaultRule.RouteOptions.Server)
 		}
 		if defaultRule.RouteOptions.BypassIfFailed {
 			t.Fatal("expected Microsoft update delivery DNS not to fall back to direct DNS")

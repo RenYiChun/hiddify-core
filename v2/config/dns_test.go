@@ -115,6 +115,46 @@ func TestSetDnsForcesDNSServerDialerResolutionToIPv4WhenIPv6Disabled(t *testing.
 	}
 }
 
+func TestSetDnsAddsMicrosoftUpdateRemoteServerThroughDedicatedProxyWhenAvailable(t *testing.T) {
+	var options option.Options
+	options.Outbounds = []option.Outbound{
+		{
+			Type: C.TypeBalancer,
+			Tag:  OutboundMicrosoftUpdateProxyTag,
+			Options: &option.BalancerOutboundOptions{
+				Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+			},
+		},
+	}
+	staticIPs := map[string][]string{}
+
+	err := setDns(
+		&options,
+		&HiddifyOptions{
+			DNSOptions: DNSOptions{
+				RemoteDnsAddress: "https://dns.google/dns-query",
+				DirectDnsAddress: "https://dns.alidns.com/dns-query",
+			},
+			InboundOptions: InboundOptions{
+				EnableTun: true,
+			},
+			RouteOptions: RouteOptions{
+				IPv6Mode: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			},
+		},
+		&staticIPs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := findTestDNSServer(t, options.DNS.Servers, DNSMicrosoftUpdateRemoteTag)
+	dialer := takeTestDNSServerDialerOptions(t, server)
+	if dialer.Detour != OutboundMicrosoftUpdateProxyTag {
+		t.Fatalf("expected Microsoft update DNS to detour through dedicated proxy, got %q", dialer.Detour)
+	}
+}
+
 func TestAddForceDirectRoutesOutboundServerDomainsThroughDirectDNS(t *testing.T) {
 	options := option.Options{
 		Outbounds: []option.Outbound{

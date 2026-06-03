@@ -26,12 +26,13 @@ import (
 )
 
 const (
-	DNSRemoteTag         = "dns-remote"
-	DNSRemoteTagFallback = "dns-remote-fallback"
-	DNSLocalTag          = "dns-local"
-	DNSStaticTag         = "dns-static"
-	DNSDirectTag         = "dns-direct"
-	DNSRemoteNoWarpTag   = "dns-remote-no-warp"
+	DNSRemoteTag                = "dns-remote"
+	DNSRemoteTagFallback        = "dns-remote-fallback"
+	DNSMicrosoftUpdateRemoteTag = "dns-remote-microsoft-update"
+	DNSLocalTag                 = "dns-local"
+	DNSStaticTag                = "dns-static"
+	DNSDirectTag                = "dns-direct"
+	DNSRemoteNoWarpTag          = "dns-remote-no-warp"
 	// DNSBlockTag        = "dns-block"
 	DNSFakeTag         = "dns-fake"
 	DNSTricksDirectTag = "dns-trick-direct"
@@ -43,12 +44,13 @@ const (
 	OutboundDirectTag = "direct §hide§"
 	OutboundBypassTag = "bypass §hide§"
 	// OutboundBlockTag          = "block §hide§"
-	OutboundSelectTag             = "select"
-	OutboundURLTestTag            = "lowest"
-	OutboundRoundRobinTag         = "balance"
-	OutboundProcessStableProxyTag = "process-stable-proxy §hide§"
-	OutboundDNSTag                = "dns-out §hide§"
-	OutboundDirectFragmentTag     = "direct-fragment §hide§"
+	OutboundSelectTag               = "select"
+	OutboundURLTestTag              = "lowest"
+	OutboundRoundRobinTag           = "balance"
+	OutboundProcessStableProxyTag   = "process-stable-proxy §hide§"
+	OutboundMicrosoftUpdateProxyTag = "microsoft-update-proxy §hide§"
+	OutboundDNSTag                  = "dns-out §hide§"
+	OutboundDirectFragmentTag       = "direct-fragment §hide§"
 
 	WARPConfigTag = "🔒 WARP"
 
@@ -62,7 +64,7 @@ const (
 var (
 	OutboundMainDetour       = OutboundSelectTag
 	OutboundWARPConfigDetour = OutboundDirectFragmentTag
-	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundProcessStableProxyTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
+	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundProcessStableProxyTag, OutboundMicrosoftUpdateProxyTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
 )
 
 // TODO include selectors
@@ -542,6 +544,9 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 	if stableProcessProxy := newProcessStableProxyOutbound(tags, opt); stableProcessProxy != nil {
 		outbounds = append([]option.Outbound{*stableProcessProxy}, outbounds...)
 	}
+	if microsoftUpdateProxy := newMicrosoftUpdateProxyOutbound(tags); microsoftUpdateProxy != nil {
+		outbounds = append([]option.Outbound{*microsoftUpdateProxy}, outbounds...)
+	}
 	selector := option.Outbound{
 		Type: C.TypeSelector,
 		Tag:  OutboundSelectTag,
@@ -826,10 +831,18 @@ func appendMicrosoftUpdateProxyRules(
 	dnsRules []option.DefaultDNSRule,
 	routeRules []option.Rule,
 	hopt *HiddifyOptions,
+	proxyOutboundTag string,
+	proxyDNSServerTag string,
 ) ([]option.DefaultDNSRule, []option.Rule) {
 	domainSuffixes := MicrosoftUpdateProxyDomainSuffixes()
 	if len(domainSuffixes) == 0 {
 		return dnsRules, routeRules
+	}
+	if proxyOutboundTag == "" {
+		proxyOutboundTag = OutboundMainDetour
+	}
+	if proxyDNSServerTag == "" {
+		proxyDNSServerTag = DNSRemoteTag
 	}
 	dnsRules = append(dnsRules, option.DefaultDNSRule{
 		RawDefaultDNSRule: option.RawDefaultDNSRule{
@@ -838,7 +851,7 @@ func appendMicrosoftUpdateProxyRules(
 		DNSRuleAction: option.DNSRuleAction{
 			Action: C.RuleActionTypeRoute,
 			RouteOptions: option.DNSRouteActionOptions{
-				Server:         DNSRemoteTag,
+				Server:         proxyDNSServerTag,
 				Strategy:       effectiveRemoteDNSDomainStrategy(hopt),
 				RewriteTTL:     &DEFAULT_DNS_TTL,
 				BypassIfFailed: false,
@@ -854,7 +867,7 @@ func appendMicrosoftUpdateProxyRules(
 			RuleAction: option.RuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.RouteActionOptions{
-					Outbound: OutboundMainDetour,
+					Outbound: proxyOutboundTag,
 				},
 			},
 		},
@@ -1225,7 +1238,13 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 	}
-	dnsRules, routeRules = appendMicrosoftUpdateProxyRules(dnsRules, routeRules, hopt)
+	dnsRules, routeRules = appendMicrosoftUpdateProxyRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		microsoftUpdateProxyOutboundTag(options),
+		microsoftUpdateRemoteDNSServerTag(options),
+	)
 	dnsRules, routeRules = appendDirectDomainSuffixRules(
 		dnsRules,
 		routeRules,

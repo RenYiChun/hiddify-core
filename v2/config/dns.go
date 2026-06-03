@@ -24,6 +24,7 @@ var DnsDirectTags = []string{
 var DnsRemoteTags = []string{
 	DNSRemoteTag,
 	DNSRemoteTagFallback,
+	DNSMicrosoftUpdateRemoteTag,
 	DNSTricksDirectTag,
 }
 
@@ -59,6 +60,14 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	remote_dns_fallback, err := getDNSServerOptions(DNSRemoteTagFallback, fallbackAddr, DNSDirectTag, OutboundMainDetour, dnsServerDialerStrategy)
 	if err != nil {
 		return err
+	}
+	var remote_microsoft_update_dns *option.DNSServerOptions
+	microsoftUpdateDNSDetour := microsoftUpdateProxyOutboundTag(options)
+	if microsoftUpdateDNSDetour != OutboundMainDetour {
+		remote_microsoft_update_dns, err = getDNSServerOptions(DNSMicrosoftUpdateRemoteTag, remoteAddr, DNSDirectTag, microsoftUpdateDNSDetour, dnsServerDialerStrategy)
+		if err != nil {
+			return err
+		}
 	}
 	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, remoteNoWarpAddr, DNSDirectTag, OutboundWARPConfigDetour, dnsServerDialerStrategy)
 	if err != nil {
@@ -128,6 +137,9 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	if dnsServerDialerStrategy == option.DomainStrategy(C.DomainStrategyIPv4Only) {
 		dnsOptions.Strategy = dnsServerDialerStrategy
 	}
+	if remote_microsoft_update_dns != nil {
+		dnsOptions.Servers = append(dnsOptions.Servers, *remote_microsoft_update_dns)
+	}
 	if opt.EnableFakeDNS {
 		inet4Range := badoption.Prefix(netip.MustParsePrefix("198.18.0.0/15"))
 		inet6Range := badoption.Prefix(netip.MustParsePrefix("fc00::/18"))
@@ -154,6 +166,25 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	// options.DNS.StaticIPs["ipapi.co"] = []string{"www.speedtest.net", "cloudflare.com"}
 	// options.DNS.StaticIPs["api.ip.sb"] = []string{"www.speedtest.net", "cloudflare.com"}
 	return nil
+}
+
+func microsoftUpdateRemoteDNSServerTag(options *option.Options) string {
+	if hasDNSServerTag(options, DNSMicrosoftUpdateRemoteTag) {
+		return DNSMicrosoftUpdateRemoteTag
+	}
+	return DNSRemoteTag
+}
+
+func hasDNSServerTag(options *option.Options, tag string) bool {
+	if options == nil || options.DNS == nil {
+		return false
+	}
+	for _, server := range options.DNS.Servers {
+		if server.Tag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func isDNSAddressIPLiteral(dnsAddress string) bool {
