@@ -4,4 +4,4 @@
 	branch = extended
 [submodule "ray2sing"]
 	path = ray2sing
-	url = git@github.com:hiddify/ray2sing.git
+	url = https://github.com/RenYiChun/ray2sing.git
