@@ -380,6 +380,34 @@ func TestSetRoutingOptionsAddsDynamicDirectBypassDomainRulesOutsideTun(t *testin
 	assertStringSet(t, domainRule.Domain, []string{"smartservice.console.aliyun.com"})
 }
 
+func TestLoadDynamicDirectBypassRouteMatchersSkipsMicrosoftUpdateDeliveryEntries(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+	if err := os.WriteFile(cachePath, []byte(`[
+		{"host":"dl.delivery.mp.microsoft.com","ip":"14.29.45.71","reason":"direct","expires_at":"`+future+`"},
+		{"host":"ctldl.windowsupdate.com","ip":"14.119.92.7","reason":"direct","expires_at":"`+future+`"},
+		{"host":"storeedgefd.dsx.mp.microsoft.com","ip":"23.43.187.13","reason":"direct","expires_at":"`+future+`"},
+		{"host":"array811.prod.do.dsp.mp.microsoft.com","ip":"13.107.246.74","reason":"direct","expires_at":"`+future+`"},
+		{"host":"displaycatalog.mp.microsoft.com","ip":"150.171.109.149","reason":"direct","expires_at":"`+future+`"},
+		{"host":"emdl.ws.microsoft.com","ip":"20.54.24.148","reason":"direct","expires_at":"`+future+`"},
+		{"host":"smartservice.console.aliyun.com","ip":"47.89.238.193","reason":"direct","expires_at":"`+future+`"}
+	]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	matchers := loadDynamicDirectBypassRouteMatchers(&HiddifyOptions{
+		RouteOptions: RouteOptions{
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassRoutesPath:    cachePath,
+			DynamicDirectBypassMaxRoutes:     128,
+			DynamicDirectBypassMaxRoutesHost: 32,
+		},
+	}, time.Now())
+
+	assertStringSet(t, matchers.domains, []string{"smartservice.console.aliyun.com"})
+	assertStringSet(t, matchers.cidrs, []string{"47.89.238.193/32"})
+}
+
 func TestSetRoutingOptionsKeepsDirectBootstrapResolverOutsideTun(t *testing.T) {
 	options := option.Options{
 		DNS: &option.DNSOptions{},
@@ -643,6 +671,113 @@ func TestSetRoutingOptionsAvoidsGeoIPDirectRouteInTun(t *testing.T) {
 	}
 	if !foundGeoSiteDirect {
 		t.Fatal("expected TUN route rules to keep geosite-cn direct routing")
+	}
+}
+
+func TestSetRoutingOptionsProxiesMicrosoftUpdateForEveryRegion(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		region    string
+		enableTun bool
+	}{
+		{name: "cn-tun", region: "cn", enableTun: true},
+		{name: "other-tun", region: "other", enableTun: true},
+		{name: "us-tun", region: "us", enableTun: true},
+		{name: "cn-system-proxy", region: "cn", enableTun: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := option.Options{
+				DNS: &option.DNSOptions{},
+			}
+
+			if err := setRoutingOptions(&options, &HiddifyOptions{
+				DNSOptions: DNSOptions{
+					DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+				},
+				InboundOptions: InboundOptions{
+					EnableTun: testCase.enableTun,
+				},
+				RouteOptions: RouteOptions{
+					BypassLAN: true,
+				},
+				Region: testCase.region,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			assertMicrosoftUpdateProxyRules(t, options)
+		})
+	}
+}
+
+func TestSetRoutingOptionsOrdersMicrosoftUpdateBeforeChinaDirectRulesInTun(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyRuleIndex, proxyDNSRuleIndex := assertMicrosoftUpdateProxyRules(t, options)
+
+	cnDirectRuleIndex := -1
+	geositeDirectRuleIndex := -1
+	for i, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.RouteOptions.Outbound != OutboundDirectTag {
+			continue
+		}
+		if containsString(defaultRule.DomainSuffix, ".cn") && cnDirectRuleIndex < 0 {
+			cnDirectRuleIndex = i
+		}
+		if containsString(defaultRule.RuleSet, "geosite-cn") && geositeDirectRuleIndex < 0 {
+			geositeDirectRuleIndex = i
+		}
+	}
+	if proxyRuleIndex < 0 {
+		t.Fatal("expected Microsoft update proxy route rule")
+	}
+	if cnDirectRuleIndex < 0 || geositeDirectRuleIndex < 0 {
+		t.Fatal("expected region direct route rules")
+	}
+	if proxyRuleIndex > cnDirectRuleIndex || proxyRuleIndex > geositeDirectRuleIndex {
+		t.Fatalf("expected Microsoft update proxy route before region direct rules, got proxy=%d cn=%d geosite=%d", proxyRuleIndex, cnDirectRuleIndex, geositeDirectRuleIndex)
+	}
+
+	cnDirectDNSRuleIndex := -1
+	geositeDirectDNSRuleIndex := -1
+	for i, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.RouteOptions.Server != DNSMultiDirectTag {
+			continue
+		}
+		if containsString(defaultRule.DomainSuffix, ".cn") && cnDirectDNSRuleIndex < 0 {
+			cnDirectDNSRuleIndex = i
+		}
+		if containsString(defaultRule.RuleSet, "geosite-cn") && geositeDirectDNSRuleIndex < 0 {
+			geositeDirectDNSRuleIndex = i
+		}
+	}
+	if proxyDNSRuleIndex < 0 {
+		t.Fatal("expected Microsoft update proxy DNS rule")
+	}
+	if cnDirectDNSRuleIndex < 0 || geositeDirectDNSRuleIndex < 0 {
+		t.Fatal("expected region direct DNS rules")
+	}
+	if proxyDNSRuleIndex > cnDirectDNSRuleIndex || proxyDNSRuleIndex > geositeDirectDNSRuleIndex {
+		t.Fatalf("expected Microsoft update proxy DNS before region direct DNS rules, got proxy=%d cn=%d geosite=%d", proxyDNSRuleIndex, cnDirectDNSRuleIndex, geositeDirectDNSRuleIndex)
 	}
 }
 
@@ -990,6 +1125,48 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options) (routeIndex int, dnsIndex int) {
+	t.Helper()
+
+	routeIndex = -1
+	for i, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if !containsString(defaultRule.DomainSuffix, "delivery.mp.microsoft.com") {
+			continue
+		}
+		routeIndex = i
+		if defaultRule.RouteOptions.Outbound != OutboundMainDetour {
+			t.Fatalf("expected Microsoft update delivery route to use %q, got %q", OutboundMainDetour, defaultRule.RouteOptions.Outbound)
+		}
+		if !containsString(defaultRule.DomainSuffix, "dsp.mp.microsoft.com") {
+			t.Fatal("expected Microsoft update route to include DSP download suffix")
+		}
+	}
+	if routeIndex < 0 {
+		t.Fatal("expected Microsoft update proxy route rule")
+	}
+
+	dnsIndex = -1
+	for i, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if !containsString(defaultRule.DomainSuffix, "delivery.mp.microsoft.com") {
+			continue
+		}
+		dnsIndex = i
+		if defaultRule.RouteOptions.Server != DNSRemoteTag {
+			t.Fatalf("expected Microsoft update delivery DNS to use %q, got %q", DNSRemoteTag, defaultRule.RouteOptions.Server)
+		}
+		if defaultRule.RouteOptions.BypassIfFailed {
+			t.Fatal("expected Microsoft update delivery DNS not to fall back to direct DNS")
+		}
+	}
+	if dnsIndex < 0 {
+		t.Fatal("expected Microsoft update proxy DNS rule")
+	}
+
+	return routeIndex, dnsIndex
 }
 
 func findDynamicDirectBypassRule(rules []option.Rule) *option.DefaultRule {

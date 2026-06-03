@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	hconfig "github.com/hiddify/hiddify-core/v2/config"
 	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/clashapi/trafficontrol"
 	"github.com/sagernet/sing-box/option"
@@ -263,6 +264,9 @@ func selectDynamicDirectBypassCandidates(
 		if host == "" {
 			continue
 		}
+		if hconfig.IsDynamicDirectBypassExcludedHost(host) {
+			continue
+		}
 		state := hosts[host]
 		if state == nil {
 			state = &hostState{ips: map[netip.Addr]struct{}{}}
@@ -341,6 +345,9 @@ func (m *dynamicDirectBypassManager) applyCandidates(
 		}
 	}()
 	for _, candidate := range candidates {
+		if hconfig.IsDynamicDirectBypassExcludedHost(candidate.Host) {
+			continue
+		}
 		candidateReason := normalizeDynamicDirectBypassReason(candidate.Reason)
 		if candidateReason == dynamicDirectBypassReasonRemoteFailure &&
 			!isDynamicDirectBypassRemoteFailureAllowed(candidate.Host, m.config) {
@@ -497,6 +504,19 @@ func dynamicDirectBypassRouteProbeKey(host string, ip netip.Addr, port uint16) d
 	}
 }
 
+func dynamicDirectBypassFailedDirectRouteProbeKeys(
+	host string,
+	ip netip.Addr,
+	port uint16,
+) []dynamicDirectBypassRemoteProbeKey {
+	key := dynamicDirectBypassRouteProbeKey(host, ip, port)
+	if port != 0 {
+		return []dynamicDirectBypassRemoteProbeKey{key}
+	}
+	httpKey := dynamicDirectBypassRouteProbeKey(host, ip, 80)
+	return []dynamicDirectBypassRemoteProbeKey{key, httpKey}
+}
+
 func (m *dynamicDirectBypassManager) shouldSkipFailedDirectRouteLocked(
 	host string,
 	ip netip.Addr,
@@ -506,18 +526,20 @@ func (m *dynamicDirectBypassManager) shouldSkipFailedDirectRouteLocked(
 	if m == nil || len(m.failedDirectRoutes) == 0 {
 		return false
 	}
-	key := dynamicDirectBypassRouteProbeKey(host, ip, port)
-	failedAt, exists := m.failedDirectRoutes[key]
-	if !exists {
-		return false
+	for _, key := range dynamicDirectBypassFailedDirectRouteProbeKeys(host, ip, port) {
+		failedAt, exists := m.failedDirectRoutes[key]
+		if !exists {
+			continue
+		}
+		if now.Sub(failedAt) >= dynamicDirectBypassRemoteFailureProbeRetryInterval {
+			delete(m.failedDirectRoutes, key)
+			continue
+		}
+		Log(LogLevel_DEBUG, LogType_CORE, "dynamic direct bypass failed direct route retry skipped: ",
+			host, " -> ", ip)
+		return true
 	}
-	if now.Sub(failedAt) >= dynamicDirectBypassRemoteFailureProbeRetryInterval {
-		delete(m.failedDirectRoutes, key)
-		return false
-	}
-	Log(LogLevel_DEBUG, LogType_CORE, "dynamic direct bypass failed direct route retry skipped: ",
-		host, " -> ", ip)
-	return true
+	return false
 }
 
 func (m *dynamicDirectBypassManager) markFailedDirectRouteLocked(
@@ -539,7 +561,9 @@ func (m *dynamicDirectBypassManager) clearFailedDirectRouteLocked(host string, i
 	if m == nil || len(m.failedDirectRoutes) == 0 {
 		return
 	}
-	delete(m.failedDirectRoutes, dynamicDirectBypassRouteProbeKey(host, ip, port))
+	for _, key := range dynamicDirectBypassFailedDirectRouteProbeKeys(host, ip, port) {
+		delete(m.failedDirectRoutes, key)
+	}
 }
 
 func (m *dynamicDirectBypassManager) probeRemoteFailureDirectRoute(
@@ -810,6 +834,13 @@ func (m *dynamicDirectBypassManager) loadCacheAndApply(ctx context.Context, now 
 	hostCounts := map[string]int{}
 	for _, route := range cached {
 		if isDynamicDirectBypassSelfRoute(route) {
+			changed = true
+			continue
+		}
+		if hconfig.IsDynamicDirectBypassExcludedHost(route.Host) {
+			if ip, err := netip.ParseAddr(route.IP); err == nil {
+				toDelete = append(toDelete, ip)
+			}
 			changed = true
 			continue
 		}

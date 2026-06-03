@@ -49,7 +49,7 @@ func TestApplyRouteConnectionAdmissionLimitsDefaultsInvalidValues(t *testing.T) 
 func TestApplyRouteConnectionAdmissionLimitsNormalizesLegacyDefaults(t *testing.T) {
 	custom := map[string]any{
 		customRouteDirectConnectionLimitKey: 512,
-		customRouteProxyConnectionLimitKey:  "128",
+		customRouteProxyConnectionLimitKey:  "256",
 	}
 	defer singroute.SetRouteConnectionAdmissionLimits(
 		singroute.DefaultDirectRouteConnectionAdmissionLimit,

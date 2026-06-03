@@ -232,7 +232,7 @@ func TestSetHiddifyCustomOptionsNormalizesLegacyRouteAdmissionDefaults(t *testin
 	hopt := &HiddifyOptions{
 		RouteOptions: RouteOptions{
 			DirectRouteConnectionLimit: 512,
-			ProxyRouteConnectionLimit:  128,
+			ProxyRouteConnectionLimit:  256,
 		},
 	}
 

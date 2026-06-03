@@ -359,6 +359,24 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresHiddifyOwnTraffic(t *testing.
 	}
 }
 
+func TestSelectDynamicDirectBypassCandidatesIgnoresMicrosoftUpdateDeliveryTraffic(t *testing.T) {
+	cfg := dynamicDirectBypassConfig{
+		Enabled:          true,
+		MaxRoutesPerHost: 4,
+	}
+	connections := []dynamicDirectBypassConnection{
+		hotDirectConnection("tlu.dl.delivery.mp.microsoft.com", "119.147.142.189"),
+		hotDirectConnection("msedge.b.tlu.dl.delivery.mp.microsoft.com", "113.59.44.200"),
+		hotDirectConnection("ctldl.windowsupdate.com", "14.119.92.7"),
+	}
+
+	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+
+	if len(candidates) != 0 {
+		t.Fatalf("expected Microsoft update delivery traffic not to seed dynamic bypass routes, got %#v", candidates)
+	}
+}
+
 func TestSelectDynamicDirectBypassCandidatesSelectsSingleRemoteHandshakeFailure(t *testing.T) {
 	cfg := dynamicDirectBypassConfig{
 		Enabled:          true,
@@ -1032,6 +1050,59 @@ func TestDynamicDirectBypassManagerBacksOffFailedDirectRoute(t *testing.T) {
 
 	if len(routeManager.added) != 1 || routeManager.added[0] != ip {
 		t.Fatalf("expected failed direct route to retry after backoff, got %#v", routeManager.added)
+	}
+}
+
+func TestDynamicDirectBypassManagerBacksOffFailedDirectRouteOnHTTPPort(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+		EagerSuffixes:    []string{"wxwork.example"},
+	}, routeManager, nil, nil, cachePath)
+	ip := netip.MustParseAddr("182.254.118.119")
+	manager.routes[ip] = dynamicDirectBypassRoute{
+		Host:      "wxwork.example",
+		IP:        ip.String(),
+		LastSeen:  now.Add(-time.Minute),
+		ExpiresAt: now.Add(time.Hour),
+	}
+	manager.saveCacheLocked()
+
+	manager.cleanupFailedDirectRoutes(context.Background(), []dynamicDirectBypassConnection{
+		{
+			Host:            "wxwork.example",
+			Destination:     ip,
+			DestinationPort: 80,
+			Network:         "tcp",
+			Outbound:        "direct §hide§",
+			OutboundType:    "direct",
+			Chain:           []string{"direct §hide§"},
+			Upload:          149,
+			Download:        0,
+			CreatedAt:       now,
+			ClosedAt:        now.Add(2 * time.Second),
+		},
+	})
+	candidate := dynamicDirectBypassCandidate{
+		Host: "wxwork.example",
+		IPs:  []netip.Addr{ip},
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(time.Minute))
+
+	if len(routeManager.added) != 0 {
+		t.Fatalf("expected recent HTTP failed direct route not to be re-added, got %#v", routeManager.added)
+	}
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now.Add(6*time.Minute))
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != ip {
+		t.Fatalf("expected HTTP failed direct route to retry after backoff, got %#v", routeManager.added)
 	}
 }
 

@@ -123,7 +123,7 @@ const DefaultBalancerStrategy = "round-robin"
 
 const (
 	DefaultDirectRouteConnectionLimit       = 1024
-	DefaultProxyRouteConnectionLimit        = 256
+	DefaultProxyRouteConnectionLimit        = 512
 	DefaultDynamicDirectBypassTTL           = DurationInSeconds(86400)
 	DefaultDynamicDirectBypassMaxRoutes     = 2048
 	DefaultDynamicDirectBypassMaxRoutesHost = 32

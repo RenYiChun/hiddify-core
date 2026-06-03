@@ -137,7 +137,7 @@ func normalizeRouteConnectionAdmissionLimit(limit int, fallback int) int {
 	if fallback == singroute.DefaultDirectRouteConnectionAdmissionLimit && limit == 512 {
 		return fallback
 	}
-	if fallback == singroute.DefaultProxyRouteConnectionAdmissionLimit && limit == 128 {
+	if fallback == singroute.DefaultProxyRouteConnectionAdmissionLimit && (limit == 128 || limit == 256) {
 		return fallback
 	}
 	return limit

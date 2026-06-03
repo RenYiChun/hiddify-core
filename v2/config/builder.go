@@ -331,7 +331,7 @@ func normalizeRouteConnectionLimit(limit int, defaultLimit int) int {
 	if defaultLimit == DefaultDirectRouteConnectionLimit && limit == 512 {
 		return defaultLimit
 	}
-	if defaultLimit == DefaultProxyRouteConnectionLimit && limit == 128 {
+	if defaultLimit == DefaultProxyRouteConnectionLimit && (limit == 128 || limit == 256) {
 		return defaultLimit
 	}
 	return limit
@@ -822,6 +822,46 @@ func appendDirectDomainSuffixRules(
 	return dnsRules, routeRules
 }
 
+func appendMicrosoftUpdateProxyRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	domainSuffixes := MicrosoftUpdateProxyDomainSuffixes()
+	if len(domainSuffixes) == 0 {
+		return dnsRules, routeRules
+	}
+	dnsRules = append(dnsRules, option.DefaultDNSRule{
+		RawDefaultDNSRule: option.RawDefaultDNSRule{
+			DomainSuffix: domainSuffixes,
+		},
+		DNSRuleAction: option.DNSRuleAction{
+			Action: C.RuleActionTypeRoute,
+			RouteOptions: option.DNSRouteActionOptions{
+				Server:         DNSRemoteTag,
+				Strategy:       effectiveRemoteDNSDomainStrategy(hopt),
+				RewriteTTL:     &DEFAULT_DNS_TTL,
+				BypassIfFailed: false,
+			},
+		},
+	})
+	routeRules = append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				DomainSuffix: domainSuffixes,
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{
+					Outbound: OutboundMainDetour,
+				},
+			},
+		},
+	})
+	return dnsRules, routeRules
+}
+
 func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	// var inboundDomainStrategy option.DomainStrategy
 	// if !opt.ResolveDestination {
@@ -1185,6 +1225,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 	}
+	dnsRules, routeRules = appendMicrosoftUpdateProxyRules(dnsRules, routeRules, hopt)
 	dnsRules, routeRules = appendDirectDomainSuffixRules(
 		dnsRules,
 		routeRules,
@@ -1648,6 +1689,9 @@ func loadDynamicDirectBypassRouteMatchers(hopt *HiddifyOptions, now time.Time) d
 			continue
 		}
 		host := strings.ToLower(strings.TrimSpace(entry.Host))
+		if IsDynamicDirectBypassExcludedHost(host) {
+			continue
+		}
 		if !shouldUseDynamicDirectBypassCachedRouteMatcher(entry, host, eagerSuffixes) {
 			continue
 		}
