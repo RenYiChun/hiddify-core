@@ -30,6 +30,8 @@ var DnsRemoteTags = []string{
 
 var DEFAULT_DNS_TTL = uint32(60 * 60 * 24)
 
+const forcedProxyRemoteDNSFallbackAddr = "https://cloudflare-dns.com/dns-query"
+
 func getDnsAddress(d string) string {
 	if !strings.Contains(d, "://") {
 		return "udp://" + d
@@ -64,7 +66,7 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	var remote_microsoft_update_dns *option.DNSServerOptions
 	microsoftUpdateDNSDetour := microsoftUpdateProxyOutboundTag(options)
 	if microsoftUpdateDNSDetour != OutboundMainDetour {
-		remote_microsoft_update_dns, err = getDNSServerOptions(DNSMicrosoftUpdateRemoteTag, remoteAddr, DNSDirectTag, microsoftUpdateDNSDetour, dnsServerDialerStrategy)
+		remote_microsoft_update_dns, err = getDNSServerOptions(DNSMicrosoftUpdateRemoteTag, forcedProxyRemoteDNSAddress(remoteAddr), DNSDirectTag, microsoftUpdateDNSDetour, dnsServerDialerStrategy)
 		if err != nil {
 			return err
 		}
@@ -220,6 +222,21 @@ func isPlainTCPIPDNS(dnsAddress string) bool {
 		return false
 	}
 	return serverAddr.Port == 0 || serverAddr.Port == 53
+}
+
+func forcedProxyRemoteDNSAddress(dnsAddress string) string {
+	if isPlainDNSAddress(dnsAddress) {
+		return forcedProxyRemoteDNSFallbackAddr
+	}
+	return dnsAddress
+}
+
+func isPlainDNSAddress(dnsAddress string) bool {
+	serverURL, err := url.Parse(dnsAddress)
+	if err != nil || serverURL == nil {
+		return false
+	}
+	return serverURL.Scheme == "" || serverURL.Scheme == C.DNSTypeUDP || serverURL.Scheme == C.DNSTypeTCP
 }
 
 func getAllOutboundsOptions(options *option.Options) []any {

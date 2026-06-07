@@ -41,6 +41,23 @@ func TestSetExperimentalPrefersReliableHTTPSConnectionTestURLs(t *testing.T) {
 	}
 }
 
+func TestSetLogEnablesWallClockTimestampsForBoxLog(t *testing.T) {
+	var options option.Options
+	hopt := DefaultHiddifyOptions()
+
+	setLog(&options, hopt)
+
+	if options.Log == nil {
+		t.Fatal("expected log options")
+	}
+	if options.Log.Output != "data/box.log" {
+		t.Fatalf("expected box log output, got %q", options.Log.Output)
+	}
+	if !options.Log.Timestamp {
+		t.Fatal("expected box.log to include wall-clock timestamps")
+	}
+}
+
 func TestSetHiddifyCustomOptionsAddsRouteAdmissionLimits(t *testing.T) {
 	options := option.Options{}
 	hopt := &HiddifyOptions{

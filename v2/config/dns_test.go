@@ -155,6 +155,90 @@ func TestSetDnsAddsMicrosoftUpdateRemoteServerThroughDedicatedProxyWhenAvailable
 	}
 }
 
+func TestSetDnsUsesDoHForMicrosoftUpdateRemoteServerWhenRemoteDNSIsPlainTCP(t *testing.T) {
+	var options option.Options
+	options.Outbounds = []option.Outbound{
+		{
+			Type: C.TypeBalancer,
+			Tag:  OutboundMicrosoftUpdateProxyTag,
+			Options: &option.BalancerOutboundOptions{
+				Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+			},
+		},
+	}
+	staticIPs := map[string][]string{}
+
+	err := setDns(
+		&options,
+		&HiddifyOptions{
+			DNSOptions: DNSOptions{
+				RemoteDnsAddress: "tcp://8.8.8.8",
+				DirectDnsAddress: "https://dns.alidns.com/dns-query",
+			},
+			InboundOptions: InboundOptions{
+				EnableTun: true,
+			},
+		},
+		&staticIPs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := findTestDNSServer(t, options.DNS.Servers, DNSMicrosoftUpdateRemoteTag)
+	if server.Type != C.DNSTypeHTTPS {
+		t.Fatalf("expected Microsoft update DNS to use HTTPS, got %q", server.Type)
+	}
+	dnsOptions, ok := server.Options.(*option.RemoteHTTPSDNSServerOptions)
+	if !ok {
+		t.Fatalf("expected Microsoft update DNS to use HTTPS options, got %T", server.Options)
+	}
+	if dnsOptions.Server != "cloudflare-dns.com" {
+		t.Fatalf("expected Microsoft update DNS to use cloudflare-dns.com, got %q", dnsOptions.Server)
+	}
+	if dnsOptions.Detour != OutboundMicrosoftUpdateProxyTag {
+		t.Fatalf("expected Microsoft update DNS to detour through dedicated proxy, got %q", dnsOptions.Detour)
+	}
+}
+
+func TestSetDnsDoesNotRouteClaudeRemoteDNSThroughClaudeProxy(t *testing.T) {
+	var options option.Options
+	options.Outbounds = []option.Outbound{
+		{
+			Type: C.TypeURLTest,
+			Tag:  OutboundClaudeProxyTag,
+			Options: &option.URLTestOutboundOptions{
+				Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+			},
+		},
+	}
+	staticIPs := map[string][]string{}
+
+	err := setDns(
+		&options,
+		&HiddifyOptions{
+			DNSOptions: DNSOptions{
+				RemoteDnsAddress: "https://dns.google/dns-query",
+				DirectDnsAddress: "https://dns.alidns.com/dns-query",
+			},
+			InboundOptions: InboundOptions{
+				EnableTun: true,
+			},
+			RouteOptions: RouteOptions{
+				IPv6Mode: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+			},
+		},
+		&staticIPs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasDNSServerTag(&options, DNSClaudeRemoteTag) {
+		t.Fatalf("expected Claude domains to use generic remote DNS, not a DNS server detoured through %q", OutboundClaudeProxyTag)
+	}
+}
+
 func TestAddForceDirectRoutesOutboundServerDomainsThroughDirectDNS(t *testing.T) {
 	options := option.Options{
 		Outbounds: []option.Outbound{

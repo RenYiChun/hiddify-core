@@ -29,6 +29,7 @@ const (
 	DNSRemoteTag                = "dns-remote"
 	DNSRemoteTagFallback        = "dns-remote-fallback"
 	DNSMicrosoftUpdateRemoteTag = "dns-remote-microsoft-update"
+	DNSClaudeRemoteTag          = "dns-remote-claude"
 	DNSLocalTag                 = "dns-local"
 	DNSStaticTag                = "dns-static"
 	DNSDirectTag                = "dns-direct"
@@ -49,6 +50,8 @@ const (
 	OutboundRoundRobinTag           = "balance"
 	OutboundProcessStableProxyTag   = "process-stable-proxy §hide§"
 	OutboundMicrosoftUpdateProxyTag = "microsoft-update-proxy §hide§"
+	OutboundGooglePlayProxyTag      = "google-play-proxy §hide§"
+	OutboundClaudeProxyTag          = "claude-proxy §hide§"
 	OutboundDNSTag                  = "dns-out §hide§"
 	OutboundDirectFragmentTag       = "direct-fragment §hide§"
 
@@ -64,7 +67,7 @@ const (
 var (
 	OutboundMainDetour       = OutboundSelectTag
 	OutboundWARPConfigDetour = OutboundDirectFragmentTag
-	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundProcessStableProxyTag, OutboundMicrosoftUpdateProxyTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
+	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundProcessStableProxyTag, OutboundMicrosoftUpdateProxyTag, OutboundGooglePlayProxyTag, OutboundClaudeProxyTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
 )
 
 // TODO include selectors
@@ -547,6 +550,12 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 	if microsoftUpdateProxy := newMicrosoftUpdateProxyOutbound(tags); microsoftUpdateProxy != nil {
 		outbounds = append([]option.Outbound{*microsoftUpdateProxy}, outbounds...)
 	}
+	if googlePlayProxy := newGooglePlayProxyOutbound(tags); googlePlayProxy != nil {
+		outbounds = append([]option.Outbound{*googlePlayProxy}, outbounds...)
+	}
+	if claudeProxy := newClaudeProxyOutbound(tags); claudeProxy != nil {
+		outbounds = append([]option.Outbound{*claudeProxy}, outbounds...)
+	}
 	selector := option.Outbound{
 		Type: C.TypeSelector,
 		Tag:  OutboundSelectTag,
@@ -674,7 +683,7 @@ func setLog(options *option.Options, opt *HiddifyOptions) {
 		Level:        opt.LogLevel,
 		Output:       opt.LogFile,
 		Disabled:     false,
-		Timestamp:    false,
+		Timestamp:    true,
 		DisableColor: true,
 	}
 }
@@ -827,6 +836,69 @@ func appendDirectDomainSuffixRules(
 	return dnsRules, routeRules
 }
 
+func appendDirectFragmentDomainSuffixRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	domainSuffixes []string,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	if len(domainSuffixes) == 0 {
+		return dnsRules, routeRules
+	}
+	dnsRules = appendDirectDNSRules(
+		dnsRules,
+		option.RawDefaultDNSRule{
+			DomainSuffix: domainSuffixes,
+		},
+		hopt,
+	)
+	routeRules = append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				DomainSuffix: domainSuffixes,
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{
+					Outbound: OutboundDirectFragmentTag,
+				},
+			},
+		},
+	})
+	return dnsRules, routeRules
+}
+
+func appendMicrosoftStoreControlDirectRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	return appendDirectFragmentDomainSuffixRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		MicrosoftStoreControlDirectDomainSuffixes(),
+	)
+}
+
+func appendMicrosoftStoreCdnProxyRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	proxyOutboundTag string,
+	proxyDNSServerTag string,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	return appendForcedProxyDomainRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		MicrosoftStoreCdnProxyDomainSuffixes(),
+		proxyOutboundTag,
+		proxyDNSServerTag,
+	)
+}
+
 func appendMicrosoftUpdateProxyRules(
 	dnsRules []option.DefaultDNSRule,
 	routeRules []option.Rule,
@@ -834,7 +906,58 @@ func appendMicrosoftUpdateProxyRules(
 	proxyOutboundTag string,
 	proxyDNSServerTag string,
 ) ([]option.DefaultDNSRule, []option.Rule) {
-	domainSuffixes := MicrosoftUpdateProxyDomainSuffixes()
+	return appendForcedProxyDomainRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		MicrosoftUpdateProxyDomainSuffixes(),
+		proxyOutboundTag,
+		proxyDNSServerTag,
+	)
+}
+
+func appendGooglePlayProxyRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	proxyOutboundTag string,
+	proxyDNSServerTag string,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	return appendForcedProxyDomainRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		GooglePlayProxyDomainSuffixes(),
+		proxyOutboundTag,
+		proxyDNSServerTag,
+	)
+}
+
+func appendClaudeProxyRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	proxyOutboundTag string,
+	proxyDNSServerTag string,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	return appendForcedProxyDomainRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		ClaudeProxyDomainSuffixes(),
+		proxyOutboundTag,
+		proxyDNSServerTag,
+	)
+}
+
+func appendForcedProxyDomainRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+	domainSuffixes []string,
+	proxyOutboundTag string,
+	proxyDNSServerTag string,
+) ([]option.DefaultDNSRule, []option.Rule) {
 	if len(domainSuffixes) == 0 {
 		return dnsRules, routeRules
 	}
@@ -873,6 +996,27 @@ func appendMicrosoftUpdateProxyRules(
 		},
 	})
 	return dnsRules, routeRules
+}
+
+func appendLocalArtifactDNSRules(dnsRules []option.DefaultDNSRule, hopt *HiddifyOptions) []option.DefaultDNSRule {
+	domains := LocalArtifactDomains()
+	if len(domains) == 0 {
+		return dnsRules
+	}
+	return append(dnsRules, option.DefaultDNSRule{
+		RawDefaultDNSRule: option.RawDefaultDNSRule{
+			Domain: domains,
+		},
+		DNSRuleAction: option.DNSRuleAction{
+			Action: C.RuleActionTypeRoute,
+			RouteOptions: option.DNSRouteActionOptions{
+				Server:         DNSLocalTag,
+				Strategy:       effectiveDirectDNSDomainStrategy(hopt),
+				RewriteTTL:     &DEFAULT_DNS_TTL,
+				BypassIfFailed: false,
+			},
+		},
+	})
 }
 
 func setInbound(options *option.Options, hopt *HiddifyOptions) {
@@ -1057,6 +1201,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 
 	dnsRules = append(dnsRules, forceDirectRules...)
 	dnsRules = appendLocalReverseDNSRules(dnsRules)
+	dnsRules = appendLocalArtifactDNSRules(dnsRules, hopt)
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
@@ -1101,6 +1246,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 	}
 	routeRules = appendProcessDirectRouteRules(routeRules, hopt)
 	routeRules = appendProcessStableProxyRouteRules(routeRules, hopt)
+	routeRules = appendClaudeProxyProcessRouteRules(routeRules, claudeProxyOutboundTag(options))
 
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
@@ -1156,9 +1302,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 	}
 
 	dynamicDirectBypassMatchers := loadDynamicDirectBypassRouteMatchers(hopt, time.Now())
-	routeRules = appendDynamicDirectBypassCIDRRouteRules(routeRules, dynamicDirectBypassMatchers)
 	routeRules = appendTunSniffOverrideDestinationRule(routeRules, hopt)
-	routeRules = appendDynamicDirectBypassDomainRouteRules(routeRules, dynamicDirectBypassMatchers)
 
 	// for _, rule := range opt.Rules {
 	// 	routeRule := rule.MakeRule()
@@ -1238,6 +1382,18 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		})
 	}
+	dnsRules, routeRules = appendMicrosoftStoreCdnProxyRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		microsoftUpdateProxyOutboundTag(options),
+		microsoftUpdateRemoteDNSServerTag(options),
+	)
+	dnsRules, routeRules = appendMicrosoftStoreControlDirectRules(
+		dnsRules,
+		routeRules,
+		hopt,
+	)
 	dnsRules, routeRules = appendMicrosoftUpdateProxyRules(
 		dnsRules,
 		routeRules,
@@ -1245,6 +1401,22 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		microsoftUpdateProxyOutboundTag(options),
 		microsoftUpdateRemoteDNSServerTag(options),
 	)
+	dnsRules, routeRules = appendGooglePlayProxyRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		googlePlayProxyOutboundTag(options),
+		DNSRemoteTag,
+	)
+	dnsRules, routeRules = appendClaudeProxyRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		claudeProxyOutboundTag(options),
+		DNSRemoteTag,
+	)
+	routeRules = appendDynamicDirectBypassCIDRRouteRules(routeRules, dynamicDirectBypassMatchers)
+	routeRules = appendDynamicDirectBypassDomainRouteRules(routeRules, dynamicDirectBypassMatchers)
 	dnsRules, routeRules = appendDirectDomainSuffixRules(
 		dnsRules,
 		routeRules,

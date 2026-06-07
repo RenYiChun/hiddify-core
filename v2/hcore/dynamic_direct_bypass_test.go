@@ -1009,11 +1009,11 @@ func TestDynamicDirectBypassManagerBacksOffFailedDirectRoute(t *testing.T) {
 		RouteTTL:         5 * time.Minute,
 		MaxRoutes:        10,
 		MaxRoutesPerHost: 4,
-		EagerSuffixes:    []string{"google.com"},
+		EagerSuffixes:    []string{"examplecdn.com"},
 	}, routeManager, nil, nil, cachePath)
 	ip := netip.MustParseAddr("142.251.34.91")
 	manager.routes[ip] = dynamicDirectBypassRoute{
-		Host:      "storage.googleapis.com",
+		Host:      "storage.examplecdn.com",
 		IP:        ip.String(),
 		LastSeen:  now.Add(-time.Minute),
 		ExpiresAt: now.Add(time.Hour),
@@ -1022,7 +1022,7 @@ func TestDynamicDirectBypassManagerBacksOffFailedDirectRoute(t *testing.T) {
 
 	manager.cleanupFailedDirectRoutes(context.Background(), []dynamicDirectBypassConnection{
 		{
-			Host:            "storage.googleapis.com",
+			Host:            "storage.examplecdn.com",
 			Destination:     ip,
 			DestinationPort: 443,
 			Network:         "tcp",
@@ -1036,7 +1036,7 @@ func TestDynamicDirectBypassManagerBacksOffFailedDirectRoute(t *testing.T) {
 		},
 	})
 	candidate := dynamicDirectBypassCandidate{
-		Host: "storage.googleapis.com",
+		Host: "storage.examplecdn.com",
 		IPs:  []netip.Addr{ip},
 	}
 

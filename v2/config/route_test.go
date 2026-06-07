@@ -86,6 +86,54 @@ func TestSetRoutingOptionsRoutesLoopbackReverseDNSToLocal(t *testing.T) {
 	}
 }
 
+func TestSetRoutingOptionsResolvesClaudeLocalArtifactsInvalidLocally(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	localIndex := -1
+	remoteIndex := -1
+	for index, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if containsString(defaultRule.Domain, "local-artifacts.invalid") {
+			localIndex = index
+			if defaultRule.RouteOptions.Server != DNSLocalTag {
+				t.Fatalf("expected local-artifacts.invalid to use %q, got %q", DNSLocalTag, defaultRule.RouteOptions.Server)
+			}
+			if defaultRule.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected local-artifacts.invalid DNS not to fall through: %+v", defaultRule)
+			}
+		}
+		if defaultRule.RouteOptions.Server == DNSMultiRemoteTag {
+			remoteIndex = index
+		}
+	}
+	if localIndex == -1 {
+		t.Fatal("expected local-artifacts.invalid DNS rule")
+	}
+	if remoteIndex == -1 {
+		t.Fatal("expected final remote DNS rule")
+	}
+	if localIndex > remoteIndex {
+		t.Fatalf("expected local-artifacts.invalid DNS before final remote DNS, got %d and %d", localIndex, remoteIndex)
+	}
+}
+
 func TestSetRoutingOptionsRejectsIPv6DestinationsWhenIPv4Only(t *testing.T) {
 	options := option.Options{
 		DNS: &option.DNSOptions{},
@@ -386,6 +434,10 @@ func TestLoadDynamicDirectBypassRouteMatchersSkipsMicrosoftUpdateDeliveryEntries
 	if err := os.WriteFile(cachePath, []byte(`[
 		{"host":"dl.delivery.mp.microsoft.com","ip":"14.29.45.71","reason":"direct","expires_at":"`+future+`"},
 		{"host":"ctldl.windowsupdate.com","ip":"14.119.92.7","reason":"direct","expires_at":"`+future+`"},
+		{"host":"dcat-b-tlu-net.trafficmanager.net","ip":"199.232.214.172","reason":"direct","expires_at":"`+future+`"},
+		{"host":"bg.microsoft.map.fastly.net","ip":"199.232.210.172","reason":"direct","expires_at":"`+future+`"},
+		{"host":"cdn.storeedgefd.dsx.mp.microsoft.com","ip":"23.43.187.13","reason":"direct","expires_at":"`+future+`"},
+		{"host":"storeedge.microsoft.com","ip":"23.43.187.13","reason":"direct","expires_at":"`+future+`"},
 		{"host":"storeedgefd.dsx.mp.microsoft.com","ip":"23.43.187.13","reason":"direct","expires_at":"`+future+`"},
 		{"host":"array811.prod.do.dsp.mp.microsoft.com","ip":"13.107.246.74","reason":"direct","expires_at":"`+future+`"},
 		{"host":"displaycatalog.mp.microsoft.com","ip":"150.171.109.149","reason":"direct","expires_at":"`+future+`"},
@@ -717,11 +769,322 @@ func TestMicrosoftUpdateProxyDomainSuffixesIncludeObservedStoreDownloadDependenc
 		"t-ring.msedge.net",
 		"t-ring-s2.msedge.net",
 		"c2r.ts.cdn.office.net",
+		"delivery.microsoft.com",
+		"prod.do.dsp.mp.microsoft.com.edgekey.net",
+		"d.akamaiedge.net",
+		"dspw65.akamai.net",
+		"fg.microsoft.map.fastly.net",
+		"bg.microsoft.map.fastly.net",
+		"wu-b-net.trafficmanager.net",
+		"dcat-b-tlu-net.trafficmanager.net",
+		"dcat-f-nlu-net.trafficmanager.net",
+		"dcat-f-tlu-net.trafficmanager.net",
+		"cdp-f-ssl-tlu-net.trafficmanager.net",
+		"tlu.dl.delivery.mp.microsoft.com-c.edgesuite.net",
+		"packageretrieval-gthdggdsd6g6bme6.westus2-01.azurewebsites.net",
 	} {
 		if !containsString(suffixes, expected) {
 			t.Fatalf("expected Microsoft update proxy suffixes to include %q, got %#v", expected, suffixes)
 		}
 	}
+
+	for _, controlDomain := range MicrosoftStoreControlDirectDomainSuffixes() {
+		if containsString(suffixes, controlDomain) {
+			t.Fatalf("expected Store control suffix %q not to be routed through Microsoft update file download proxy", controlDomain)
+		}
+	}
+}
+
+func TestMicrosoftStoreControlDomainsRouteThroughDirectFragment(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSMicrosoftUpdateRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundMicrosoftUpdateProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	storeRouteIndex, _ := assertDirectFragmentDomainRules(t, options, "storeedgefd.dsx.mp.microsoft.com", DNSMultiDirectTag)
+	microsoftRouteIndex, _ := assertMicrosoftUpdateProxyRules(t, options, OutboundMicrosoftUpdateProxyTag, DNSMicrosoftUpdateRemoteTag)
+	if storeRouteIndex >= microsoftRouteIndex {
+		t.Fatalf("expected Store control direct-fragment rule before Microsoft update file proxy rule, got store=%d microsoft=%d", storeRouteIndex, microsoftRouteIndex)
+	}
+	assertDirectFragmentDomainRules(t, options, "displaycatalog.mp.microsoft.com", DNSMultiDirectTag)
+	assertDirectFragmentDomainRules(t, options, "dsp.mp.microsoft.com", DNSMultiDirectTag)
+	assertDirectFragmentDomainRules(t, options, "storeedge.microsoft.com", DNSMultiDirectTag)
+}
+
+func TestMicrosoftStoreCdnRoutesThroughUpdateProxyBeforeStoreControlDirect(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSMicrosoftUpdateRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundMicrosoftUpdateProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cdnRouteIndex, cdnDNSIndex := assertForcedProxyDomainRules(t, options, "cdn.storeedgefd.dsx.mp.microsoft.com", OutboundMicrosoftUpdateProxyTag, DNSMicrosoftUpdateRemoteTag)
+	storeRouteIndex, storeDNSIndex := assertDirectFragmentDomainRules(t, options, "storeedgefd.dsx.mp.microsoft.com", DNSMultiDirectTag)
+	if cdnRouteIndex >= storeRouteIndex {
+		t.Fatalf("expected Store CDN proxy route before generic Store direct route, got cdn=%d store=%d", cdnRouteIndex, storeRouteIndex)
+	}
+	if cdnDNSIndex >= storeDNSIndex {
+		t.Fatalf("expected Store CDN proxy DNS before generic Store direct DNS, got cdn=%d store=%d", cdnDNSIndex, storeDNSIndex)
+	}
+}
+
+func TestGooglePlayDomainsAreExcludedFromDynamicDirectBypass(t *testing.T) {
+	for _, host := range []string{
+		"rr3---sn-j5o76n7e.xn--ngstr-lra8j.com",
+		"android.clients.google.com",
+		"services.googleapis.cn",
+		"play.googleapis.com",
+	} {
+		if !IsDynamicDirectBypassExcludedHost(host) {
+			t.Fatalf("expected Google Play host %q to be excluded from dynamic direct bypass", host)
+		}
+	}
+}
+
+func TestAndroidConnectivityCheckCanUseDynamicDirectBypass(t *testing.T) {
+	if IsDynamicDirectBypassExcludedHost("connectivitycheck.gstatic.com") {
+		t.Fatal("expected Android connectivity check host to remain eligible for dynamic direct bypass")
+	}
+}
+
+func TestClaudeDomainsAreExcludedFromDynamicDirectBypass(t *testing.T) {
+	for _, host := range []string{
+		"a-api.anthropic.com",
+		"assets-proxy.anthropic.com",
+		"s-cdn.anthropic.com",
+		"downloads.claude.ai",
+		"claude.ai",
+		"www.claude.com",
+		"files.claudemcpcontent.com",
+	} {
+		if !IsDynamicDirectBypassExcludedHost(host) {
+			t.Fatalf("expected Claude host %q to be excluded from dynamic direct bypass", host)
+		}
+	}
+}
+
+func TestSetRoutingOptionsRoutesGooglePlayThroughForcedProxyRules(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundMainDetour, DNSRemoteTag)
+}
+
+func TestSetRoutingOptionsRoutesGooglePlayThroughMicrosoftUpdateProxyWithRemoteDNSWhenAvailable(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSMicrosoftUpdateRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundMicrosoftUpdateProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
+}
+
+func TestSetRoutingOptionsRoutesGooglePlayThroughDedicatedProxyWhenAvailable(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSMicrosoftUpdateRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundMicrosoftUpdateProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundGooglePlayProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 http httpupgrade direct vmess § 80 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundGooglePlayProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundGooglePlayProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundGooglePlayProxyTag, DNSRemoteTag)
+}
+
+func TestSetRoutingOptionsRoutesClaudeTrafficThroughDedicatedProxyButKeepsGenericRemoteDNS(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{
+					{
+						Type: C.DNSTypeHTTPS,
+						Tag:  DNSClaudeRemoteTag,
+					},
+				},
+			},
+		},
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeURLTest,
+				Tag:  OutboundClaudeProxyTag,
+				Options: &option.URLTestOutboundOptions{
+					Outbounds: []string{"209.87.93.20 tls_h2 grpc direct vless § 443 1"},
+				},
+			},
+		},
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN: true,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertForcedProxyDomainRules(t, options, "anthropic.com", OutboundClaudeProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "claude.ai", OutboundClaudeProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "claudemcpcontent.com", OutboundClaudeProxyTag, DNSRemoteTag)
 }
 
 func TestSetRoutingOptionsRoutesMicrosoftUpdateThroughDedicatedProxyWhenAvailable(t *testing.T) {
@@ -836,6 +1199,70 @@ func TestSetRoutingOptionsOrdersMicrosoftUpdateBeforeChinaDirectRulesInTun(t *te
 	}
 	if proxyDNSRuleIndex > cnDirectDNSRuleIndex || proxyDNSRuleIndex > geositeDirectDNSRuleIndex {
 		t.Fatalf("expected Microsoft update proxy DNS before region direct DNS rules, got proxy=%d cn=%d geosite=%d", proxyDNSRuleIndex, cnDirectDNSRuleIndex, geositeDirectDNSRuleIndex)
+	}
+}
+
+func TestSetRoutingOptionsOrdersMicrosoftUpdateBeforeDynamicDirectBypassInTun(t *testing.T) {
+	options := option.Options{
+		DNS: &option.DNSOptions{},
+	}
+	cachePath := filepath.Join(t.TempDir(), "dynamic-direct-bypass-routes.json")
+	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+	if err := os.WriteFile(cachePath, []byte(`[
+		{"host":"smartservice.console.aliyun.com","ip":"47.89.238.193","reason":"direct","expires_at":"`+future+`"}
+	]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setRoutingOptions(&options, &HiddifyOptions{
+		DNSOptions: DNSOptions{
+			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyUseIPv4),
+		},
+		InboundOptions: InboundOptions{
+			EnableTun: true,
+		},
+		RouteOptions: RouteOptions{
+			BypassLAN:                        true,
+			EnableDynamicDirectBypass:        true,
+			DynamicDirectBypassRoutesPath:    cachePath,
+			DynamicDirectBypassMaxRoutes:     128,
+			DynamicDirectBypassMaxRoutesHost: 32,
+		},
+		Region: "cn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sniffIndex := -1
+	dynamicCIDRIndex := -1
+	dynamicDomainIndex := -1
+	for i, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if defaultRule.Action == C.RuleActionTypeSniff &&
+			containsString(defaultRule.Inbound, InboundTUNTag) &&
+			defaultRule.SniffOptions.OverrideDestination {
+			sniffIndex = i
+		}
+		if containsString(defaultRule.IPCIDR, "47.89.238.193/32") &&
+			defaultRule.RouteOptions.Outbound == OutboundDirectTag {
+			dynamicCIDRIndex = i
+		}
+		if containsString(defaultRule.Domain, "smartservice.console.aliyun.com") &&
+			defaultRule.RouteOptions.Outbound == OutboundDirectTag {
+			dynamicDomainIndex = i
+		}
+	}
+	microsoftUpdateIndex, _ := assertMicrosoftUpdateProxyRules(t, options, OutboundMainDetour, DNSRemoteTag)
+
+	if sniffIndex < 0 || dynamicCIDRIndex < 0 || dynamicDomainIndex < 0 || microsoftUpdateIndex < 0 {
+		t.Fatalf("expected sniff, Microsoft update, and dynamic direct rules, got sniff=%d microsoft=%d cidr=%d domain=%d",
+			sniffIndex, microsoftUpdateIndex, dynamicCIDRIndex, dynamicDomainIndex)
+	}
+	if !(sniffIndex < microsoftUpdateIndex &&
+		microsoftUpdateIndex < dynamicCIDRIndex &&
+		microsoftUpdateIndex < dynamicDomainIndex) {
+		t.Fatalf("expected TUN sniff < Microsoft update proxy < dynamic direct rules, got sniff=%d microsoft=%d cidr=%d domain=%d",
+			sniffIndex, microsoftUpdateIndex, dynamicCIDRIndex, dynamicDomainIndex)
 	}
 }
 
@@ -1187,41 +1614,86 @@ func containsString(values []string, needle string) bool {
 
 func assertMicrosoftUpdateProxyRules(t *testing.T, options option.Options, expectedOutbound string, expectedDNSServer string) (routeIndex int, dnsIndex int) {
 	t.Helper()
+	routeIndex, dnsIndex = assertForcedProxyDomainRules(t, options, "delivery.mp.microsoft.com", expectedOutbound, expectedDNSServer)
 
+	for _, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if containsString(defaultRule.DomainSuffix, "delivery.mp.microsoft.com") &&
+			!containsString(defaultRule.DomainSuffix, "tlu.dl.delivery.mp.microsoft.com-c.edgesuite.net") {
+			t.Fatal("expected Microsoft update route to include observed TLU download CDN suffix")
+		}
+	}
+	return routeIndex, dnsIndex
+}
+
+func assertDirectFragmentDomainRules(t *testing.T, options option.Options, domainSuffix string, expectedDNSServer string) (routeIndex int, dnsIndex int) {
+	t.Helper()
 	routeIndex = -1
 	for i, rule := range options.Route.Rules {
 		defaultRule := rule.DefaultOptions
-		if !containsString(defaultRule.DomainSuffix, "delivery.mp.microsoft.com") {
+		if !containsString(defaultRule.DomainSuffix, domainSuffix) {
 			continue
 		}
 		routeIndex = i
-		if defaultRule.RouteOptions.Outbound != expectedOutbound {
-			t.Fatalf("expected Microsoft update delivery route to use %q, got %q", expectedOutbound, defaultRule.RouteOptions.Outbound)
-		}
-		if !containsString(defaultRule.DomainSuffix, "dsp.mp.microsoft.com") {
-			t.Fatal("expected Microsoft update route to include DSP download suffix")
+		if defaultRule.RouteOptions.Outbound != OutboundDirectFragmentTag {
+			t.Fatalf("expected %s route to use %q, got %q", domainSuffix, OutboundDirectFragmentTag, defaultRule.RouteOptions.Outbound)
 		}
 	}
 	if routeIndex < 0 {
-		t.Fatal("expected Microsoft update proxy route rule")
+		t.Fatalf("expected direct-fragment route rule for %s", domainSuffix)
 	}
 
 	dnsIndex = -1
 	for i, rule := range options.DNS.Rules {
 		defaultRule := rule.DefaultOptions
-		if !containsString(defaultRule.DomainSuffix, "delivery.mp.microsoft.com") {
+		if !containsString(defaultRule.DomainSuffix, domainSuffix) {
 			continue
 		}
 		dnsIndex = i
 		if defaultRule.RouteOptions.Server != expectedDNSServer {
-			t.Fatalf("expected Microsoft update delivery DNS to use %q, got %q", expectedDNSServer, defaultRule.RouteOptions.Server)
-		}
-		if defaultRule.RouteOptions.BypassIfFailed {
-			t.Fatal("expected Microsoft update delivery DNS not to fall back to direct DNS")
+			t.Fatalf("expected %s DNS to use %q, got %q", domainSuffix, expectedDNSServer, defaultRule.RouteOptions.Server)
 		}
 	}
 	if dnsIndex < 0 {
-		t.Fatal("expected Microsoft update proxy DNS rule")
+		t.Fatalf("expected direct DNS rule for %s", domainSuffix)
+	}
+
+	return routeIndex, dnsIndex
+}
+
+func assertForcedProxyDomainRules(t *testing.T, options option.Options, domainSuffix string, expectedOutbound string, expectedDNSServer string) (routeIndex int, dnsIndex int) {
+	t.Helper()
+	routeIndex = -1
+	for i, rule := range options.Route.Rules {
+		defaultRule := rule.DefaultOptions
+		if !containsString(defaultRule.DomainSuffix, domainSuffix) {
+			continue
+		}
+		routeIndex = i
+		if defaultRule.RouteOptions.Outbound != expectedOutbound {
+			t.Fatalf("expected %s route to use %q, got %q", domainSuffix, expectedOutbound, defaultRule.RouteOptions.Outbound)
+		}
+	}
+	if routeIndex < 0 {
+		t.Fatalf("expected forced proxy route rule for %s", domainSuffix)
+	}
+
+	dnsIndex = -1
+	for i, rule := range options.DNS.Rules {
+		defaultRule := rule.DefaultOptions
+		if !containsString(defaultRule.DomainSuffix, domainSuffix) {
+			continue
+		}
+		dnsIndex = i
+		if defaultRule.RouteOptions.Server != expectedDNSServer {
+			t.Fatalf("expected %s DNS to use %q, got %q", domainSuffix, expectedDNSServer, defaultRule.RouteOptions.Server)
+		}
+		if defaultRule.RouteOptions.BypassIfFailed {
+			t.Fatalf("expected %s DNS not to fall back to direct DNS", domainSuffix)
+		}
+	}
+	if dnsIndex < 0 {
+		t.Fatalf("expected forced proxy DNS rule for %s", domainSuffix)
 	}
 
 	return routeIndex, dnsIndex

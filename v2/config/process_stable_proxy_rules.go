@@ -8,9 +8,15 @@ import (
 )
 
 var defaultProcessStableProxyExcludedKeywords = []string{"naive", "quic", "tuic"}
-var defaultMicrosoftUpdateProxyExcludedKeywords = []string{"naive", "quic", "tuic", " § 80"}
+var defaultMicrosoftUpdateProxyExcludedKeywords = []string{"naive", "quic", "tuic", "ssh", "hysteria", "mieru", "wireguard"}
+var defaultGooglePlayProxyExcludedKeywords = []string{"naive", "quic", "tuic", "xhttp", "httpupgrade", " § 80", "ssh", "hysteria", "mieru", "wireguard"}
+var defaultClaudeProxyExcludedKeywords = []string{"naive", "quic", "tuic", "ssh", "hysteria", "mieru", "wireguard"}
+var claudeProxyProcessNames = []string{"Claude.exe", "claude.exe", "cowork-svc.exe"}
 
 const processStableProxyFallbackReasonNoStableCandidates = "no stable candidates after excluded keywords"
+const microsoftUpdateProxyHealthCheckURL = "http://1d.tlu.dl.delivery.mp.microsoft.com/"
+const googlePlayProxyHealthCheckURL = "https://redirector.gvt1.com"
+const claudeProxyHealthCheckURL = "https://status.anthropic.com/api/v2/status.json"
 
 func newProcessStableProxyOutbound(tags []string, hopt *HiddifyOptions) *option.Outbound {
 	if len(processStableProxyRuleNames(hopt)) == 0 {
@@ -39,13 +45,43 @@ func newMicrosoftUpdateProxyOutbound(tags []string) *option.Outbound {
 		return nil
 	}
 	return &option.Outbound{
-		Type: C.TypeBalancer,
+		Type: C.TypeURLTest,
 		Tag:  OutboundMicrosoftUpdateProxyTag,
-		Options: &option.BalancerOutboundOptions{
+		Options: &option.URLTestOutboundOptions{
 			Outbounds:                 outboundTags,
-			Strategy:                  "lowest-delay",
-			DelayAcceptableRatio:      2,
-			Tolerance:                 1,
+			URL:                       microsoftUpdateProxyHealthCheckURL,
+			InterruptExistConnections: false,
+		},
+	}
+}
+
+func newGooglePlayProxyOutbound(tags []string) *option.Outbound {
+	outboundTags, _ := selectProcessStableProxyOutbounds(tags, defaultGooglePlayProxyExcludedKeywords)
+	if len(outboundTags) == 0 {
+		return nil
+	}
+	return &option.Outbound{
+		Type: C.TypeURLTest,
+		Tag:  OutboundGooglePlayProxyTag,
+		Options: &option.URLTestOutboundOptions{
+			Outbounds:                 outboundTags,
+			URL:                       googlePlayProxyHealthCheckURL,
+			InterruptExistConnections: false,
+		},
+	}
+}
+
+func newClaudeProxyOutbound(tags []string) *option.Outbound {
+	outboundTags, _ := selectProcessStableProxyOutbounds(tags, defaultClaudeProxyExcludedKeywords)
+	if len(outboundTags) == 0 {
+		return nil
+	}
+	return &option.Outbound{
+		Type: C.TypeURLTest,
+		Tag:  OutboundClaudeProxyTag,
+		Options: &option.URLTestOutboundOptions{
+			Outbounds:                 outboundTags,
+			URL:                       claudeProxyHealthCheckURL,
 			InterruptExistConnections: false,
 		},
 	}
@@ -54,6 +90,23 @@ func newMicrosoftUpdateProxyOutbound(tags []string) *option.Outbound {
 func microsoftUpdateProxyOutboundTag(options *option.Options) string {
 	if hasOutboundTag(options, OutboundMicrosoftUpdateProxyTag) {
 		return OutboundMicrosoftUpdateProxyTag
+	}
+	return OutboundMainDetour
+}
+
+func googlePlayProxyOutboundTag(options *option.Options) string {
+	if hasOutboundTag(options, OutboundGooglePlayProxyTag) {
+		return OutboundGooglePlayProxyTag
+	}
+	return microsoftUpdateProxyOutboundTag(options)
+}
+
+func claudeProxyOutboundTag(options *option.Options) string {
+	if hasOutboundTag(options, OutboundClaudeProxyTag) {
+		return OutboundClaudeProxyTag
+	}
+	if hasOutboundTag(options, OutboundProcessStableProxyTag) {
+		return OutboundProcessStableProxyTag
 	}
 	return OutboundMainDetour
 }
@@ -89,6 +142,34 @@ func appendProcessStableProxyRouteRules(routeRules []option.Rule, hopt *HiddifyO
 			},
 		},
 	})
+}
+
+func appendClaudeProxyProcessRouteRules(routeRules []option.Rule, proxyOutboundTag string) []option.Rule {
+	processNames := ClaudeProxyProcessNames()
+	if len(processNames) == 0 {
+		return routeRules
+	}
+	if proxyOutboundTag == "" {
+		proxyOutboundTag = OutboundMainDetour
+	}
+	return append(routeRules, option.Rule{
+		Type: C.RuleTypeDefault,
+		DefaultOptions: option.DefaultRule{
+			RawDefaultRule: option.RawDefaultRule{
+				ProcessName: processNames,
+			},
+			RuleAction: option.RuleAction{
+				Action: C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{
+					Outbound: proxyOutboundTag,
+				},
+			},
+		},
+	})
+}
+
+func ClaudeProxyProcessNames() []string {
+	return append([]string(nil), claudeProxyProcessNames...)
 }
 
 func processStableProxyRuleNames(hopt *HiddifyOptions) []string {
