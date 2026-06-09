@@ -3,7 +3,9 @@ package hcore
 import (
 	"context"
 	"fmt"
+	"net"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/hiddify/hiddify-core/v2/config"
@@ -16,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/monitoring"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/memory"
+	"github.com/wlynxg/anet"
 	"google.golang.org/grpc"
 )
 
@@ -411,4 +414,60 @@ func (h *HiddifyInstance) UrlTest(in *UrlTestRequest) (*hcommon.Response, error)
 		Code:    hcommon.ResponseCode_OK,
 		Message: "",
 	}, nil
+}
+
+func (s *CoreService) GetLANIP(ctx context.Context, req *hcommon.Empty) (*LANIPResponse, error) {
+	ifaces, err := anet.Interfaces()
+	if err != nil {
+		Log(LogLevel_ERROR, LogType_CORE, "GetLANIP failed: ", err)
+		return &LANIPResponse{Ip: "127.0.0.1"}, nil
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagPointToPoint != 0 {
+			continue
+		}
+
+		name := strings.ToLower(iface.Name)
+		if strings.Contains(name, "tun") ||
+			strings.Contains(name, "tap") ||
+			strings.Contains(name, "wintun") ||
+			strings.Contains(name, "utun") ||
+			strings.Contains(name, "vpn") ||
+			strings.Contains(name, "ppp") {
+			continue
+		}
+
+		addrs, err := anet.InterfaceAddrsByInterface(&iface)
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue
+			}
+
+			if ip4[0] == 10 ||
+				(ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) ||
+				(ip4[0] == 192 && ip4[1] == 168) {
+				return &LANIPResponse{Ip: ip4.String()}, nil
+			}
+		}
+	}
+
+	return &LANIPResponse{Ip: "127.0.0.1"}, nil
 }
