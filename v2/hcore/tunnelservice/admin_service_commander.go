@@ -14,7 +14,7 @@ import (
 	grpc "google.golang.org/grpc"
 )
 
-const tunnelServicePort uint16 = 18020
+const tunnelServicePort uint16 = 18021
 
 var (
 	tunnelServiceAddress = fmt.Sprintf("127.0.0.1:%d", tunnelServicePort)

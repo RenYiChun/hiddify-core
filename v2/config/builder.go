@@ -771,6 +771,9 @@ var defaultDirectDomainSuffixRules = []string{
 	"work.weixin.qq.com",
 	"weixin.qq.com",
 	"weixinbridge.com",
+	"servicewechat.com",
+	"weapp.tencentcloudapi.com",
+	"wxqcloud.qq.com.cn",
 	"wxwork.qq.com",
 	"wecom.qq.com",
 	"qq.com",
@@ -1949,7 +1952,10 @@ func isDynamicDirectBypassConfigSelfRoute(entry dynamicDirectBypassRouteCacheEnt
 			processName = strings.ToLower(processPath)
 		}
 	}
-	return processName == "hiddify.exe" || processName == "hiddify"
+	return processName == "hiddifycustom.exe" ||
+		processName == "hiddifycustom" ||
+		processName == "hiddify.exe" ||
+		processName == "hiddify"
 }
 
 func shouldUseDynamicDirectBypassCachedRouteMatcher(

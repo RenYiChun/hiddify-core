@@ -299,8 +299,12 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected eager suffixes to be []string, got %#v", custom[customDynamicDirectBypassEagerSuffixesKey])
 	}
-	if !containsString(suffixes, "myqcloud.com") || !containsString(suffixes, "weixinbridge.com") {
-		t.Fatalf("expected eager suffixes to include WeCom document domains, got %#v", suffixes)
+	if !containsString(suffixes, "myqcloud.com") ||
+		!containsString(suffixes, "weixinbridge.com") ||
+		!containsString(suffixes, "servicewechat.com") ||
+		!containsString(suffixes, "weapp.tencentcloudapi.com") ||
+		!containsString(suffixes, "wxqcloud.qq.com.cn") {
+		t.Fatalf("expected eager suffixes to include WeCom and WeChat DevTools domains, got %#v", suffixes)
 	}
 }
 

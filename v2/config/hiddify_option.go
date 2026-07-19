@@ -144,10 +144,10 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		InboundOptions: InboundOptions{
 			EnableTun:      false,
 			SetSystemProxy: false,
-			MixedPort:      12334,
-			TProxyPort:     12335,
-			RedirectPort:   12336,
-			DirectPort:     12337,
+			MixedPort:      12434,
+			TProxyPort:     12435,
+			RedirectPort:   12436,
+			DirectPort:     12437,
 			MTU:            9000,
 			StrictRoute:    true,
 			TUNStack:       "mixed",
@@ -181,7 +181,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		EnableClashApi:   true,
 		BalancerStrategy: DefaultBalancerStrategy,
 
-		ClashApiPort:   16756,
+		ClashApiPort:   16757,
 		ClashApiSecret: "",
 		// GeoIPPath:      "geoip.db",
 		// GeoSitePath:    "geosite.db",

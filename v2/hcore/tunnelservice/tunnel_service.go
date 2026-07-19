@@ -21,7 +21,7 @@ type TunnelService struct {
 
 func (s *TunnelService) Start(ctx context.Context, in *TunnelStartRequest) (*TunnelResponse, error) {
 	if in.ServerPort == 0 {
-		in.ServerPort = 12334
+		in.ServerPort = 12434
 	}
 	option := makeTunnelConfig(in)
 
@@ -54,7 +54,7 @@ func makeTunnelConfig(in *TunnelStartRequest) option.Options {
 					StrictRoute:            in.StrictRoute,
 					AutoRoute:              true,
 					Address:                ips,
-					InterfaceName:          "HiddifyTunnel",
+					InterfaceName:          "HiddifyCustomTunnel",
 					Stack:                  in.Stack,
 				},
 			},
@@ -85,6 +85,8 @@ func makeTunnelConfig(in *TunnelStartRequest) option.Options {
 					DefaultOptions: option.DefaultRule{
 						RawDefaultRule: option.RawDefaultRule{
 							ProcessName: []string{
+								"HiddifyCustom.exe",
+								"HiddifyCustom",
 								"Hiddify.exe",
 								"Hiddify",
 								"HiddifyCli",

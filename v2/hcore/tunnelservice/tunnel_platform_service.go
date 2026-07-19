@@ -17,7 +17,7 @@ type hiddifyNext struct {
 	tunnelService *TunnelService
 }
 
-var port int = 18020
+var port int = 18021
 
 func (m *hiddifyNext) StartTunnelGrpcServer(listenAddressG string) (*grpc.Server, error) {
 	lis, err := net.Listen("tcp", listenAddressG)
@@ -69,8 +69,8 @@ func getCurrentExecutableDirectory() string {
 
 func StartTunnelService(goArg string) (int, string) {
 	svcConfig := &service.Config{
-		Name:        "HiddifyTunnelService",
-		DisplayName: "Hiddify Tunnel Service",
+		Name:        "HiddifyCustomTunnelService",
+		DisplayName: "Hiddify Custom Tunnel Service",
 		Arguments:   []string{"tunnel", "run"},
 		Description: "This is a bridge for tunnel",
 		Option: map[string]interface{}{

@@ -339,23 +339,31 @@ func TestSelectDynamicDirectBypassCandidatesIgnoresHiddifyOwnTraffic(t *testing.
 		Enabled:          true,
 		MaxRoutesPerHost: 4,
 	}
-	connections := []dynamicDirectBypassConnection{
-		{
-			Host:         "cp.cloudflare.com",
-			Destination:  netip.MustParseAddr("104.18.32.47"),
-			Outbound:     "direct §hide§",
-			OutboundType: "direct",
-			Chain:        []string{"direct §hide§"},
-			ProcessName:  "Hiddify.exe",
-			ProcessPath:  `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\Hiddify.exe`,
-			Download:     512,
-		},
-	}
+	for _, process := range []struct {
+		name string
+		path string
+	}{
+		{name: "HiddifyCustom.exe", path: `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\HiddifyCustom.exe`},
+		{name: "Hiddify.exe", path: `C:\Program Files\Hiddify\Hiddify.exe`},
+	} {
+		connections := []dynamicDirectBypassConnection{
+			{
+				Host:         "cp.cloudflare.com",
+				Destination:  netip.MustParseAddr("104.18.32.47"),
+				Outbound:     "direct §hide§",
+				OutboundType: "direct",
+				Chain:        []string{"direct §hide§"},
+				ProcessName:  process.name,
+				ProcessPath:  process.path,
+				Download:     512,
+			},
+		}
 
-	candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
+		candidates := selectDynamicDirectBypassCandidates(connections, cfg, nil)
 
-	if len(candidates) != 0 {
-		t.Fatalf("expected Hiddify's own direct traffic not to seed dynamic bypass routes, got %#v", candidates)
+		if len(candidates) != 0 {
+			t.Fatalf("expected %s direct traffic not to seed dynamic bypass routes, got %#v", process.name, candidates)
+		}
 	}
 }
 
@@ -460,6 +468,92 @@ func TestDynamicDirectBypassManagerAppliesRoutesOnceAndExpiresThem(t *testing.T)
 
 	if len(routeManager.deleted) != 1 {
 		t.Fatalf("expected expired route to be deleted once, got %d deletions: %#v", len(routeManager.deleted), routeManager.deleted)
+	}
+}
+
+func TestDynamicDirectBypassManagerDefersRouteAdditionUntilDestinationIsIdle(t *testing.T) {
+	now := time.Date(2026, 7, 11, 16, 46, 0, 0, time.Local)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, "")
+	ip := netip.MustParseAddr("183.194.189.103")
+	candidate := dynamicDirectBypassCandidate{
+		Host: "mp.weixin.qq.com",
+		IPs:  []netip.Addr{ip},
+	}
+	manager.updateActiveDestinations([]dynamicDirectBypassConnection{{
+		Host:        candidate.Host,
+		Destination: ip,
+		Network:     "tcp",
+	}}, now)
+
+	manager.applyCandidates(context.Background(), []dynamicDirectBypassCandidate{candidate}, now)
+
+	if len(routeManager.added) != 0 {
+		t.Fatalf("expected active WeChat upload route to be deferred, got additions %#v", routeManager.added)
+	}
+	if len(manager.pendingRoutes) != 1 {
+		t.Fatalf("expected one deferred route, got %#v", manager.pendingRoutes)
+	}
+
+	manager.updateActiveDestinations(nil, now.Add(dynamicDirectBypassRouteSwitchIdleDelay-time.Second))
+	manager.applyPendingRoutes(context.Background(), now.Add(dynamicDirectBypassRouteSwitchIdleDelay-time.Second))
+	if len(routeManager.added) != 0 {
+		t.Fatalf("expected route to remain deferred during idle grace period, got additions %#v", routeManager.added)
+	}
+
+	idleAt := now.Add(dynamicDirectBypassRouteSwitchIdleDelay)
+	manager.updateActiveDestinations(nil, idleAt)
+	manager.applyPendingRoutes(context.Background(), idleAt)
+
+	if len(routeManager.added) != 1 || routeManager.added[0] != ip {
+		t.Fatalf("expected deferred route to be added after destination became idle, got %#v", routeManager.added)
+	}
+	if len(manager.pendingRoutes) != 0 {
+		t.Fatalf("expected deferred route queue to drain, got %#v", manager.pendingRoutes)
+	}
+}
+
+func TestDynamicDirectBypassManagerDefersExpiredRouteDeletionWhileDestinationIsActive(t *testing.T) {
+	now := time.Date(2026, 7, 11, 16, 46, 0, 0, time.Local)
+	routeManager := &fakeDynamicDirectBypassRouteManager{}
+	manager := newDynamicDirectBypassManager(dynamicDirectBypassConfig{
+		Enabled:          true,
+		RouteTTL:         5 * time.Minute,
+		MaxRoutes:        10,
+		MaxRoutesPerHost: 4,
+	}, routeManager, nil, nil, "")
+	ip := netip.MustParseAddr("183.194.189.103")
+	manager.routes[ip] = dynamicDirectBypassRoute{
+		Host:      "mp.weixin.qq.com",
+		IP:        ip.String(),
+		ExpiresAt: now.Add(-time.Minute),
+	}
+	manager.updateActiveDestinations([]dynamicDirectBypassConnection{{
+		Host:        "mp.weixin.qq.com",
+		Destination: ip,
+		Network:     "tcp",
+	}}, now)
+
+	manager.cleanupExpired(context.Background(), now)
+
+	if len(routeManager.deleted) != 0 {
+		t.Fatalf("expected active WeChat upload route deletion to be deferred, got %#v", routeManager.deleted)
+	}
+	if _, exists := manager.routes[ip]; !exists {
+		t.Fatal("expected active route to remain installed")
+	}
+
+	idleAt := now.Add(dynamicDirectBypassRouteSwitchIdleDelay)
+	manager.updateActiveDestinations(nil, idleAt)
+	manager.cleanupExpired(context.Background(), idleAt)
+
+	if len(routeManager.deleted) != 1 || routeManager.deleted[0] != ip {
+		t.Fatalf("expected expired route to be deleted after destination became idle, got %#v", routeManager.deleted)
 	}
 }
 
@@ -1324,8 +1418,8 @@ func TestDynamicDirectBypassManagerDropsCachedHiddifyOwnRoutesOnLoad(t *testing.
 		{
 			Host:        "cp.cloudflare.com",
 			IP:          "104.18.32.47",
-			ProcessName: "Hiddify.exe",
-			ProcessPath: `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\Hiddify.exe`,
+			ProcessName: "HiddifyCustom.exe",
+			ProcessPath: `D:\github.com\hiddify-app\build\windows\x64\runner\Debug\HiddifyCustom.exe`,
 			LastSeen:    now,
 			ExpiresAt:   now.Add(30 * time.Minute),
 		},

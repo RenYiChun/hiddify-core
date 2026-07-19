@@ -246,7 +246,7 @@ func downloadProfileContent(ctx context.Context, url string) (*request.Response,
 	resp, err := request.Send(request.Request{
 		Url:       url,
 		Method:    request.GET,
-		SocksPort: 12334,
+		SocksPort: 12434,
 		Timeout:   5 * time.Second,
 	})
 	if resp == nil {

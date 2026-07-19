@@ -20,7 +20,7 @@ var commandService = &cobra.Command{
 		case "activate":
 			tunnelservice.ActivateTunnelService(&tunnelservice.TunnelStartRequest{
 				Ipv6:       true,
-				ServerPort: 12334,
+				ServerPort: 12434,
 				Stack:      "gvisor",
 			})
 

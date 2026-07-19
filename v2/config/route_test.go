@@ -341,7 +341,7 @@ func TestSetRoutingOptionsAddsDynamicDirectBypassIPRules(t *testing.T) {
 		{"host":"smartservice.console.aliyun.com","ip":"47.89.238.193","expires_at":"`+future+`"},
 		{"host":"smartservice.console.aliyun.com","ip":"47.88.73.20","expires_at":"`+future+`"},
 		{"host":"chatgpt.com","ip":"172.64.155.209","expires_at":"`+future+`"},
-		{"host":"cp.cloudflare.com","ip":"104.18.32.47","process_name":"Hiddify.exe","process_path":"D:\\github.com\\hiddify-app\\build\\windows\\x64\\runner\\Debug\\Hiddify.exe","expires_at":"`+future+`"},
+		{"host":"cp.cloudflare.com","ip":"104.18.32.47","process_name":"HiddifyCustom.exe","process_path":"D:\\github.com\\hiddify-app\\build\\windows\\x64\\runner\\Debug\\HiddifyCustom.exe","expires_at":"`+future+`"},
 		{"host":"expired.example.com","ip":"47.88.73.19","expires_at":"`+past+`"},
 		{"host":"private.example.com","ip":"192.168.1.20","expires_at":"`+future+`"}
 	]`), 0o644); err != nil {
@@ -622,6 +622,24 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	if !foundCosDNSRule {
 		t.Fatal("expected myqcloud.com direct DNS rule for WeCom microdisk COS files")
 	}
+	for _, suffix := range []string{"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn"} {
+		found := false
+		for _, rule := range options.DNS.Rules {
+			if !containsString(rule.DefaultOptions.DomainSuffix, suffix) {
+				continue
+			}
+			found = true
+			if rule.DefaultOptions.RouteOptions.Server != DNSMultiDirectTag {
+				t.Fatalf("expected %s direct DNS rule to use %q, got %q", suffix, DNSMultiDirectTag, rule.DefaultOptions.RouteOptions.Server)
+			}
+			if rule.DefaultOptions.RouteOptions.BypassIfFailed {
+				t.Fatalf("expected %s direct DNS rule not to fall back to later DNS rules", suffix)
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s direct DNS rule for WeChat DevTools preview", suffix)
+		}
+	}
 
 	foundRouteRule := false
 	foundDriveRouteRule := false
@@ -649,6 +667,21 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	}
 	if !foundCosRouteRule {
 		t.Fatal("expected myqcloud.com direct route rule for WeCom microdisk COS files")
+	}
+	for _, suffix := range []string{"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn"} {
+		found := false
+		for _, rule := range options.Route.Rules {
+			if !containsString(rule.DefaultOptions.DomainSuffix, suffix) {
+				continue
+			}
+			found = true
+			if rule.DefaultOptions.RouteOptions.Outbound != OutboundDirectTag {
+				t.Fatalf("expected %s route rule to use %q, got %q", suffix, OutboundDirectTag, rule.DefaultOptions.RouteOptions.Outbound)
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s direct route rule for WeChat DevTools preview", suffix)
+		}
 	}
 }
 
