@@ -36,6 +36,7 @@ const (
 	dynamicDirectBypassRemoteFailureProbeTimeout       = 3 * time.Second
 	dynamicDirectBypassRemoteFailureProbeRetryInterval = 5 * time.Minute
 	dynamicDirectBypassRouteSwitchIdleDelay            = 5 * time.Second
+	dynamicDirectBypassDirectSuccessMaxAge             = 30 * time.Second
 
 	dynamicDirectBypassReasonDirect        = "direct"
 	dynamicDirectBypassReasonRemoteFailure = "remote-failure"
@@ -251,6 +252,15 @@ func selectDynamicDirectBypassCandidates(
 	config dynamicDirectBypassConfig,
 	protected map[netip.Addr]struct{},
 ) []dynamicDirectBypassCandidate {
+	return selectDynamicDirectBypassCandidatesAt(connections, config, protected, time.Now())
+}
+
+func selectDynamicDirectBypassCandidatesAt(
+	connections []dynamicDirectBypassConnection,
+	config dynamicDirectBypassConfig,
+	protected map[netip.Addr]struct{},
+	now time.Time,
+) []dynamicDirectBypassCandidate {
 	config = normalizeDynamicDirectBypassConfig(config)
 	if !config.Enabled {
 		return nil
@@ -264,7 +274,7 @@ func selectDynamicDirectBypassCandidates(
 	}
 	hosts := map[string]*hostState{}
 	for _, connection := range connections {
-		isDirect := isDynamicDirectBypassUsableDirectConnection(connection)
+		isDirect := isDynamicDirectBypassUsableDirectConnectionAt(connection, now)
 		isRemoteFailure := !isDirect && isDynamicDirectBypassRemoteFailureConnection(connection)
 		if !isDirect && !isRemoteFailure {
 			continue
@@ -876,10 +886,11 @@ func (m *dynamicDirectBypassManager) run(ctx context.Context, snapshot func() []
 		return
 	}
 	m.restoreInitial(ctx, time.Now())
+	// Learn new routes only from observed traffic. Windows DNS cache can contain
+	// many stale addresses, so scanning it here would create synthetic probes
+	// unrelated to the user's current access.
 	connectionTicker := time.NewTicker(m.config.SampleInterval)
 	defer connectionTicker.Stop()
-	dnsCacheTicker := time.NewTicker(m.config.DNSCacheInterval)
-	defer dnsCacheTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -891,16 +902,10 @@ func (m *dynamicDirectBypassManager) run(ctx context.Context, snapshot func() []
 			m.cleanupExpired(ctx, now)
 			m.cleanupFailedDirectRoutes(ctx, connections, now)
 			m.applyPendingRoutes(ctx, now)
-			candidates := selectDynamicDirectBypassCandidates(connections, m.config, m.config.ProtectedIPs)
+			candidates := selectDynamicDirectBypassCandidatesAt(connections, m.config, m.config.ProtectedIPs, now)
 			if len(candidates) > 0 {
 				m.applyCandidates(ctx, candidates, now)
 			}
-		case now := <-dnsCacheTicker.C:
-			connections := snapshot()
-			m.updateActiveDestinations(connections, now)
-			m.applyPendingRouteDeletes(ctx, now)
-			m.applyPendingRoutes(ctx, now)
-			m.applyDNSCacheCandidates(ctx, now)
 		}
 	}
 }
@@ -910,10 +915,11 @@ func (m *dynamicDirectBypassManager) restoreInitial(ctx context.Context, now tim
 		return
 	}
 	m.initialRestoreOnce.Do(func() {
+		// Persisted routes were already validated by real traffic. Restore them
+		// without probing, and let subsequent traffic refresh or remove them.
 		if err := m.loadCacheAndApply(ctx, now); err != nil {
 			Log(LogLevel_WARNING, LogType_CORE, "dynamic direct bypass cache restore failed: ", err)
 		}
-		m.applyDNSCacheCandidates(ctx, now)
 	})
 }
 
@@ -1623,10 +1629,21 @@ func isDynamicDirectBypassDirectConnection(connection dynamicDirectBypassConnect
 }
 
 func isDynamicDirectBypassUsableDirectConnection(connection dynamicDirectBypassConnection) bool {
+	return isDynamicDirectBypassUsableDirectConnectionAt(connection, time.Now())
+}
+
+func isDynamicDirectBypassUsableDirectConnectionAt(connection dynamicDirectBypassConnection, now time.Time) bool {
 	if !isDynamicDirectBypassDirectConnection(connection) {
 		return false
 	}
-	return connection.Download > dynamicDirectBypassDirectMinDownload
+	if connection.Download <= dynamicDirectBypassDirectMinDownload {
+		return false
+	}
+	if connection.ClosedAt.IsZero() {
+		return true
+	}
+	age := now.Sub(connection.ClosedAt)
+	return age >= 0 && age <= dynamicDirectBypassDirectSuccessMaxAge
 }
 
 func isDynamicDirectBypassFailedDirectConnection(connection dynamicDirectBypassConnection) bool {

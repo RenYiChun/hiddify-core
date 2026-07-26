@@ -943,6 +943,21 @@ func TestAndroidConnectivityCheckCanUseDynamicDirectBypass(t *testing.T) {
 	}
 }
 
+func TestCriticalGoogleInfrastructureIsExcludedFromDynamicDirectBypass(t *testing.T) {
+	for _, host := range []string{
+		"www.google.com",
+		"about.google",
+		"www.gstatic.com",
+		"fonts.gstatic.com",
+		"ssl.gstatic.com",
+		"c.pki.goog",
+	} {
+		if !IsDynamicDirectBypassExcludedHost(host) {
+			t.Fatalf("expected critical Google host %q to be excluded from dynamic direct bypass", host)
+		}
+	}
+}
+
 func TestClaudeDomainsAreExcludedFromDynamicDirectBypass(t *testing.T) {
 	for _, host := range []string{
 		"a-api.anthropic.com",
@@ -982,6 +997,9 @@ func TestSetRoutingOptionsRoutesGooglePlayThroughForcedProxyRules(t *testing.T) 
 	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundMainDetour, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundMainDetour, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "www.gstatic.com", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "pki.goog", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "google", OutboundMainDetour, DNSRemoteTag)
 }
 
 func TestSetRoutingOptionsRoutesGooglePlayThroughMicrosoftUpdateProxyWithRemoteDNSWhenAvailable(t *testing.T) {
@@ -1025,6 +1043,9 @@ func TestSetRoutingOptionsRoutesGooglePlayThroughMicrosoftUpdateProxyWithRemoteD
 	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundMicrosoftUpdateProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "www.gstatic.com", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "pki.goog", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "google", OutboundMainDetour, DNSRemoteTag)
 }
 
 func TestSetRoutingOptionsRoutesGooglePlayThroughDedicatedProxyWhenAvailable(t *testing.T) {
@@ -1075,6 +1096,9 @@ func TestSetRoutingOptionsRoutesGooglePlayThroughDedicatedProxyWhenAvailable(t *
 	assertForcedProxyDomainRules(t, options, "xn--ngstr-lra8j.com", OutboundGooglePlayProxyTag, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "googleapis.cn", OutboundGooglePlayProxyTag, DNSRemoteTag)
 	assertForcedProxyDomainRules(t, options, "play.googleapis.com", OutboundGooglePlayProxyTag, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "www.gstatic.com", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "pki.goog", OutboundMainDetour, DNSRemoteTag)
+	assertForcedProxyDomainRules(t, options, "google", OutboundMainDetour, DNSRemoteTag)
 }
 
 func TestSetRoutingOptionsRoutesClaudeTrafficThroughDedicatedProxyButKeepsGenericRemoteDNS(t *testing.T) {

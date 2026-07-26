@@ -49,6 +49,15 @@ var googlePlayProxyDomainSuffixes = []string{
 	"googlevideo.com",
 }
 
+var criticalGoogleInfrastructureProxyDomainSuffixes = []string{
+	"google.com",
+	"google",
+	"www.gstatic.com",
+	"fonts.gstatic.com",
+	"ssl.gstatic.com",
+	"pki.goog",
+}
+
 var claudeProxyDomainSuffixes = []string{
 	"anthropic.com",
 	"claude.ai",
@@ -64,6 +73,7 @@ var forcedProxyDomainSuffixes = mergeDomainSuffixes(
 	microsoftUpdateProxyDomainSuffixes,
 	microsoftStoreCdnProxyDomainSuffixes,
 	googlePlayProxyDomainSuffixes,
+	criticalGoogleInfrastructureProxyDomainSuffixes,
 	claudeProxyDomainSuffixes,
 )
 
@@ -88,6 +98,10 @@ func GooglePlayProxyDomainSuffixes() []string {
 	return append([]string(nil), googlePlayProxyDomainSuffixes...)
 }
 
+func CriticalGoogleInfrastructureProxyDomainSuffixes() []string {
+	return append([]string(nil), criticalGoogleInfrastructureProxyDomainSuffixes...)
+}
+
 func ClaudeProxyDomainSuffixes() []string {
 	return append([]string(nil), claudeProxyDomainSuffixes...)
 }
@@ -105,7 +119,11 @@ func IsDynamicDirectBypassExcludedHost(host string) bool {
 	if host == "" {
 		return false
 	}
-	for _, suffix := range dynamicDirectBypassExcludedDomainSuffixes {
+	return matchesDynamicDirectBypassDomainSuffix(host, dynamicDirectBypassExcludedDomainSuffixes)
+}
+
+func matchesDynamicDirectBypassDomainSuffix(host string, suffixes []string) bool {
+	for _, suffix := range suffixes {
 		if host == suffix || strings.HasSuffix(host, "."+suffix) {
 			return true
 		}

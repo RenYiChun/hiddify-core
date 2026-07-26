@@ -936,6 +936,21 @@ func appendGooglePlayProxyRules(
 	)
 }
 
+func appendCriticalGoogleInfrastructureProxyRules(
+	dnsRules []option.DefaultDNSRule,
+	routeRules []option.Rule,
+	hopt *HiddifyOptions,
+) ([]option.DefaultDNSRule, []option.Rule) {
+	return appendForcedProxyDomainRules(
+		dnsRules,
+		routeRules,
+		hopt,
+		CriticalGoogleInfrastructureProxyDomainSuffixes(),
+		OutboundMainDetour,
+		DNSRemoteTag,
+	)
+}
+
 func appendClaudeProxyRules(
 	dnsRules []option.DefaultDNSRule,
 	routeRules []option.Rule,
@@ -1410,6 +1425,11 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 		hopt,
 		googlePlayProxyOutboundTag(options),
 		DNSRemoteTag,
+	)
+	dnsRules, routeRules = appendCriticalGoogleInfrastructureProxyRules(
+		dnsRules,
+		routeRules,
+		hopt,
 	)
 	dnsRules, routeRules = appendClaudeProxyRules(
 		dnsRules,
