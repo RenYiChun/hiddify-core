@@ -7,7 +7,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-var defaultProcessStableProxyExcludedKeywords = []string{"naive", "quic", "tuic"}
+var defaultProcessStableProxyExcludedKeywords = []string{"naive", "quic", "tuic", "xhttp", "httpupgrade", " § 80", "ssh", "hysteria", "mieru", "wireguard"}
 var defaultMicrosoftUpdateProxyExcludedKeywords = []string{"naive", "quic", "tuic", "ssh", "hysteria", "mieru", "wireguard"}
 var defaultGooglePlayProxyExcludedKeywords = []string{"naive", "quic", "tuic", "xhttp", "httpupgrade", " § 80", "ssh", "hysteria", "mieru", "wireguard"}
 var defaultClaudeProxyExcludedKeywords = []string{"naive", "quic", "tuic", "ssh", "hysteria", "mieru", "wireguard"}
@@ -31,9 +31,9 @@ func newProcessStableProxyOutbound(tags []string, hopt *HiddifyOptions) *option.
 		Tag:  OutboundProcessStableProxyTag,
 		Options: &option.BalancerOutboundOptions{
 			Outbounds:                 outboundTags,
-			Strategy:                  "lowest-delay",
+			Strategy:                  "consistent-hashing",
 			DelayAcceptableRatio:      2,
-			Tolerance:                 1,
+			MaxRetry:                  3,
 			InterruptExistConnections: false,
 		},
 	}

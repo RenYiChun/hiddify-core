@@ -34,6 +34,31 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 			},
 			{
 				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 plain http direct vmess § 80 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 SSH § 40991 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 Hysteria2 § 52726 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 MieruTCP § 0 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
+				Tag:     "209.87.93.20 WireGuard § 59772 1",
+				Options: &option.DirectOutboundOptions{},
+			},
+			{
+				Type:    C.TypeDirect,
 				Tag:     "209.87.93.20 tls grpc direct vless § 443 1",
 				Options: &option.DirectOutboundOptions{},
 			},
@@ -58,7 +83,6 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 		t.Fatalf("expected balancer options for %q, got %T", outbound.Tag, outbound.Options)
 	}
 	expected := []string{
-		"209.87.93.20 tls httpupgrade direct vless § 443 1",
 		"209.87.93.20 tls grpc direct vless § 443 1",
 	}
 	if !stringSlicesEqual(balancerOptions.Outbounds, expected) {
@@ -66,6 +90,12 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 	}
 	if balancerOptions.InterruptExistConnections {
 		t.Fatalf("expected %q not to interrupt existing connections", OutboundProcessStableProxyTag)
+	}
+	if balancerOptions.Strategy != "consistent-hashing" {
+		t.Fatalf("expected stable process proxy to use consistent hashing, got %q", balancerOptions.Strategy)
+	}
+	if balancerOptions.MaxRetry != 3 {
+		t.Fatalf("expected stable process proxy max retry 3, got %d", balancerOptions.MaxRetry)
 	}
 }
 
