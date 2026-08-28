@@ -782,6 +782,8 @@ var defaultDirectDomainSuffixRules = []string{
 	"gtimg.cn",
 	"gtimg.com",
 	"myqcloud.com",
+	"tencentcloudapi.com",
+	"tcloudbase.com",
 	"qcloud.com",
 	"aliyun.com",
 	"aliyuncs.com",

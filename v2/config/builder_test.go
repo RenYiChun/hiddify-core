@@ -300,6 +300,8 @@ func TestSetHiddifyCustomOptionsAddsDynamicDirectBypassOptions(t *testing.T) {
 		t.Fatalf("expected eager suffixes to be []string, got %#v", custom[customDynamicDirectBypassEagerSuffixesKey])
 	}
 	if !containsString(suffixes, "myqcloud.com") ||
+		!containsString(suffixes, "tencentcloudapi.com") ||
+		!containsString(suffixes, "tcloudbase.com") ||
 		!containsString(suffixes, "weixinbridge.com") ||
 		!containsString(suffixes, "servicewechat.com") ||
 		!containsString(suffixes, "weapp.tencentcloudapi.com") ||

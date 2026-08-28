@@ -622,7 +622,10 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	if !foundCosDNSRule {
 		t.Fatal("expected myqcloud.com direct DNS rule for WeCom microdisk COS files")
 	}
-	for _, suffix := range []string{"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn"} {
+	for _, suffix := range []string{
+		"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn",
+		"tencentcloudapi.com", "tcloudbase.com",
+	} {
 		found := false
 		for _, rule := range options.DNS.Rules {
 			if !containsString(rule.DefaultOptions.DomainSuffix, suffix) {
@@ -668,7 +671,10 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	if !foundCosRouteRule {
 		t.Fatal("expected myqcloud.com direct route rule for WeCom microdisk COS files")
 	}
-	for _, suffix := range []string{"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn"} {
+	for _, suffix := range []string{
+		"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn",
+		"tencentcloudapi.com", "tcloudbase.com",
+	} {
 		found := false
 		for _, rule := range options.Route.Rules {
 			if !containsString(rule.DefaultOptions.DomainSuffix, suffix) {
@@ -1420,6 +1426,8 @@ func TestDefaultDirectDomainSuffixRulesIncludeCloudLoginDependencies(t *testing.
 		"cdnhwc1.com",
 		"cdnhwc2.com",
 		"globalsign.com",
+		"tencentcloudapi.com",
+		"tcloudbase.com",
 	} {
 		if !containsString(suffixes, expected) {
 			t.Fatalf("expected default direct suffix rules to include %q, got %#v", expected, suffixes)
