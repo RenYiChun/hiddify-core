@@ -9,7 +9,7 @@ import (
 	dns "github.com/sagernet/sing-dns"
 )
 
-func TestSetOutboundsDefaultsSelectorToLowestDelay(t *testing.T) {
+func TestSetOutboundsDefaultsSelectorToBalance(t *testing.T) {
 	var options option.Options
 	staticIPs := map[string][]string{}
 	input := &option.Options{
@@ -39,8 +39,8 @@ func TestSetOutboundsDefaultsSelectorToLowestDelay(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected selector options, got %T", outbound.Options)
 		}
-		if selectorOptions.Default != OutboundURLTestTag {
-			t.Fatalf("expected selector default to be %q, got %q", OutboundURLTestTag, selectorOptions.Default)
+		if selectorOptions.Default != OutboundRoundRobinTag {
+			t.Fatalf("expected selector default to be %q, got %q", OutboundRoundRobinTag, selectorOptions.Default)
 		}
 		return
 	}

@@ -21,6 +21,7 @@ func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, er
 	if err != nil {
 		return nil, err
 	}
+	content = migrateLegacyDNSOutbound(content)
 	var options option.Options
 	err = options.UnmarshalJSONContext(ctx, content)
 	return &options, err

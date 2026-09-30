@@ -35,6 +35,7 @@ func newProcessStableProxyOutbound(tags []string, hopt *HiddifyOptions) *option.
 			DelayAcceptableRatio:      2,
 			MaxRetry:                  3,
 			InterruptExistConnections: false,
+			LogSelectedOutbound:       true,
 		},
 	}
 }
@@ -225,15 +226,30 @@ func filterProcessStableProxyOutbounds(tags []string, excludedKeywords []string)
 }
 
 func selectProcessStableProxyOutbounds(tags []string, excludedKeywords []string) ([]string, bool) {
-	cleanedTags := cleanStringList(tags)
-	if len(cleanedTags) == 0 {
+	// Preserve the original tag spelling (including surrounding whitespace) so
+	// group members reference the tags actually registered on the outbounds.
+	// Cleaned tags are used only for dedup and keyword matching.
+	originalByCleaned := make(map[string]string, len(tags))
+	originals := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		cleaned := strings.TrimSpace(tag)
+		if cleaned == "" {
+			continue
+		}
+		if _, ok := originalByCleaned[cleaned]; ok {
+			continue
+		}
+		originalByCleaned[cleaned] = tag
+		originals = append(originals, tag)
+	}
+	if len(originals) == 0 {
 		return nil, false
 	}
-	stableTags := filterProcessStableProxyOutbounds(cleanedTags, excludedKeywords)
+	stableTags := filterProcessStableProxyOutbounds(originals, excludedKeywords)
 	if len(stableTags) > 0 {
 		return stableTags, false
 	}
-	return cleanedTags, true
+	return originals, true
 }
 
 func processStableProxyDiagnosticOutbounds(options *option.Options, hopt *HiddifyOptions) ([]string, []string, bool, string) {

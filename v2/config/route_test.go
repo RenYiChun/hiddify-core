@@ -624,7 +624,7 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	}
 	for _, suffix := range []string{
 		"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn",
-		"tencentcloudapi.com", "tcloudbase.com",
+		"tencentcloudapi.com", "tcloudbase.com", "zhuoan.net",
 	} {
 		found := false
 		for _, rule := range options.DNS.Rules {
@@ -673,7 +673,7 @@ func TestSetRoutingOptionsAddsChinaWorkDirectRulesForTun(t *testing.T) {
 	}
 	for _, suffix := range []string{
 		"servicewechat.com", "weapp.tencentcloudapi.com", "wxqcloud.qq.com.cn",
-		"tencentcloudapi.com", "tcloudbase.com",
+		"tencentcloudapi.com", "tcloudbase.com", "zhuoan.net",
 	} {
 		found := false
 		for _, rule := range options.Route.Rules {

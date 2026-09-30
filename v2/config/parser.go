@@ -115,6 +115,7 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 }
 
 func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *HiddifyOptions) (*option.Options, error) {
+	content = migrateLegacyDNSOutbound(content)
 	options := option.Options{}
 	err := options.UnmarshalJSONContext(ctx, content)
 
@@ -155,4 +156,82 @@ func validateResult(ctx context.Context, options *option.Options, name string) (
 		return nil, fmt.Errorf("[%s] invalid sing-box config: %w", name, err)
 	}
 	return options, nil
+}
+
+// migrateLegacyDNSOutbound migrates legacy configs that still use the `dns`
+// outbound (deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0).
+// The legacy dns outbound entries are removed and every route rule pointing
+// to one is rewritten into the equivalent rule action ("hijack-dns"), following
+// https://sing-box.sagernet.org/migration/#migrate-legacy-special-outbounds-to-rule-actions.
+// Content without legacy dns outbounds is returned unchanged.
+func migrateLegacyDNSOutbound(content []byte) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(content, &obj); err != nil {
+		return content
+	}
+
+	rawOutbounds, ok := obj["outbounds"].([]any)
+	if !ok {
+		return content
+	}
+
+	dnsTags := make(map[string]bool)
+	kept := rawOutbounds[:0]
+	removed := false
+	for _, rawOutbound := range rawOutbounds {
+		outbound, ok := rawOutbound.(map[string]any)
+		if !ok || outbound["type"] != "dns" {
+			kept = append(kept, rawOutbound)
+			continue
+		}
+		removed = true
+		if tag, ok := outbound["tag"].(string); ok && tag != "" {
+			dnsTags[tag] = true
+		}
+	}
+	if !removed {
+		return content
+	}
+	obj["outbounds"] = kept
+
+	if route, ok := obj["route"].(map[string]any); ok {
+		if rules, ok := route["rules"].([]any); ok {
+			for _, rawRule := range rules {
+				rule, ok := rawRule.(map[string]any)
+				if !ok {
+					continue
+				}
+				if outboundTag, ok := rule["outbound"].(string); ok && dnsTags[outboundTag] {
+					delete(rule, "outbound")
+					rule["action"] = "hijack-dns"
+				}
+			}
+		}
+		if finalTag, ok := route["final"].(string); ok && dnsTags[finalTag] {
+			delete(route, "final")
+		}
+	}
+
+	for _, rawOutbound := range kept {
+		outbound, ok := rawOutbound.(map[string]any)
+		if !ok {
+			continue
+		}
+		if group, ok := outbound["outbounds"].([]any); ok {
+			filtered := group[:0]
+			for _, rawTag := range group {
+				if tag, ok := rawTag.(string); ok && dnsTags[tag] {
+					continue
+				}
+				filtered = append(filtered, rawTag)
+			}
+			outbound["outbounds"] = filtered
+		}
+	}
+
+	migrated, err := json.Marshal(obj)
+	if err != nil {
+		return content
+	}
+	return migrated
 }

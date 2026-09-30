@@ -97,6 +97,9 @@ func TestSetOutboundsAddsProcessStableProxyGroupFilteringDefaultKeywords(t *test
 	if balancerOptions.MaxRetry != 3 {
 		t.Fatalf("expected stable process proxy max retry 3, got %d", balancerOptions.MaxRetry)
 	}
+	if !balancerOptions.LogSelectedOutbound {
+		t.Fatalf("expected %q to log its selected node for connection diagnostics", OutboundProcessStableProxyTag)
+	}
 }
 
 func TestSetOutboundsAddsMicrosoftUpdateProxyGroupFilteringDownloadUnstableKeywords(t *testing.T) {

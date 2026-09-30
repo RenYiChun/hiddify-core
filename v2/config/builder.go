@@ -540,7 +540,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		} else {
 			outbounds = append([]option.Outbound{balancer, urlTest}, outbounds...)
 			selectorTags = append([]string{urlTest.Tag, balancer.Tag}, selectorTags...)
-			defaultSelect = urlTest.Tag
+			defaultSelect = balancer.Tag
 
 		}
 	}
@@ -613,8 +613,6 @@ func isBlockedConnectionTestUrl(d string) bool {
 func preferredConnectionTestURLs(configured string) []string {
 	return uniqueStrings([]string{
 		"https://cp.cloudflare.com",
-		"https://www.google.com/generate_204",
-		"https://google.com/generate_204",
 		configured,
 		"http://captive.apple.com/generate_204",
 	})
@@ -768,6 +766,7 @@ func appendLocalReverseDNSRules(dnsRules []option.DefaultDNSRule) []option.Defau
 }
 
 var defaultDirectDomainSuffixRules = []string{
+	"zhuoan.net",
 	"work.weixin.qq.com",
 	"weixin.qq.com",
 	"weixinbridge.com",
